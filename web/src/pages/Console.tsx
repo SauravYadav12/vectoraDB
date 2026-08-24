@@ -24,7 +24,7 @@ export default function Console() {
     return (
       <>
         <h1>SQL Console</h1>
-        <div className="offline">Can't reach the API at <code>{API}</code>. Start it with <code>lima /tmp/vectoradb start</code>.</div>
+        <div className="offline">Can’t reach the API at <code>{API}</code>. Start it with <code>lima /tmp/vectoradb start</code>.</div>
       </>
     )
   }
@@ -32,16 +32,18 @@ export default function Console() {
   const options = branches.length ? branches : ([{ name: 'main' }] as Branch[])
 
   return (
-    <>
+    <div className="fade-up">
       <h1>SQL Console</h1>
-      <p className="muted">Run SQL against any branch, through the control-plane API.</p>
+      <p className="muted" style={{ marginTop: -2 }}>Run SQL against any branch, through the control-plane API.</p>
+
       <div className="row">
-        <label className="muted">Branch</label>
+        <span className="muted" style={{ fontSize: 13 }}>Branch</span>
         <select value={name} onChange={e => setName(e.target.value)}>
           {options.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
         </select>
-        <button onClick={run} disabled={busy}>{busy ? 'Running…' : 'Run  (⌘/Ctrl + Enter)'}</button>
+        <button className="primary" onClick={run} disabled={busy}>{busy ? 'Running…' : 'Run  ⌘/Ctrl+↵'}</button>
       </div>
+
       <textarea
         className="editor"
         value={sql}
@@ -49,8 +51,9 @@ export default function Console() {
         onChange={e => setSql(e.target.value)}
         onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') run() }}
       />
+
       {res && <Results res={res} />}
-    </>
+    </div>
   )
 }
 
@@ -60,9 +63,9 @@ function Results({ res }: { res: QueryResult }) {
   const rows = res.rows || []
   return (
     <>
-      <div className="okmsg">{res.command || 'ok'} · {rows.length} row{rows.length === 1 ? '' : 's'}</div>
+      <div className="okmsg">✓ {res.command || 'ok'} · {rows.length} row{rows.length === 1 ? '' : 's'}</div>
       {cols.length > 0 && (
-        <div className="grid-wrap">
+        <div className="grid-wrap table-wrap">
           <table>
             <thead><tr>{cols.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>
             <tbody>

@@ -32,7 +32,7 @@ export default function Docs() {
   }
 
   return (
-    <>
+    <div className="fade-up">
       <h1>Documentation</h1>
       <p className="lead">Set up, start, and use VectoraDB.</p>
 
@@ -98,6 +98,6 @@ lima /tmp/vectoradb ha failover`}</Code>
           <tr><td><code>POST /api/branches/{'{name}'}/query</code></td><td>Run SQL — {'{ "sql": "…" }'}</td></tr>
         </tbody>
       </table>
-    </>
+    </div>
   )
 }
