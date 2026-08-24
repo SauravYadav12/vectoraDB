@@ -284,6 +284,19 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); 
 .offline { background: color-mix(in srgb, var(--amber) 14%, var(--panel)); border: 1px solid var(--amber);
   color: var(--text); border-radius: 14px; padding: 14px 18px; margin: 16px 0; font-size: 14px; }
 
+/* auth */
+.usermenu { display: flex; align-items: center; gap: 10px; }
+.authcard { max-width: 400px; margin: 40px auto; background: var(--panel); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 26px 26px 28px; box-shadow: var(--shadow); }
+.authcard h1 { font-size: 24px; }
+.authcard .form { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.authcard .form input { width: 100%; }
+.authcard .form button { width: 100%; margin-top: 4px; padding: 11px; }
+.authcard .oauth { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.authcard .oauth .btn { width: 100%; text-align: center; }
+.divider { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; margin: 6px 0; }
+.divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
 .fade-up { animation: fadeUp 0.5s ease backwards; }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } }
 

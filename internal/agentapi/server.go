@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 // Package agentapi exposes the Agent Branch API: a small HTTP service that
-// gives each AI agent its own instant, isolated database branch.
+// gives each AI agent its own instant, isolated database branch. All /agents
+// routes require authentication (an API key).
 //
 //	POST   /agents/{id}/branch   -> create a branch for the agent, return a DSN
 //	DELETE /agents/{id}/branch   -> tear the agent's branch down
 //	GET    /agents               -> list active agent branches
-//	GET    /healthz              -> liveness
+//	GET    /healthz              -> liveness (public)
 package agentapi
 
 import (
@@ -15,18 +16,24 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
 )
 
 // Serve starts the Agent Branch API on addr (e.g. ":8088").
 func Serve(addr string) error {
-	mux := http.NewServeMux()
+	store, err := auth.OpenFromEnv()
+	if err != nil {
+		return err
+	}
 
+	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	mux.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
+	agents := http.NewServeMux()
+	agents.HandleFunc("GET /agents", func(w http.ResponseWriter, r *http.Request) {
 		infos, err := branch.ListAgentBranches()
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
@@ -37,8 +44,7 @@ func Serve(addr string) error {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"agents": infos})
 	})
-
-	mux.HandleFunc("POST /agents/{id}/branch", func(w http.ResponseWriter, r *http.Request) {
+	agents.HandleFunc("POST /agents/{id}/branch", func(w http.ResponseWriter, r *http.Request) {
 		info, err := branch.CreateAgentBranch(r.PathValue("id"))
 		if err != nil {
 			writeErr(w, http.StatusConflict, err)
@@ -46,8 +52,7 @@ func Serve(addr string) error {
 		}
 		writeJSON(w, http.StatusCreated, info)
 	})
-
-	mux.HandleFunc("DELETE /agents/{id}/branch", func(w http.ResponseWriter, r *http.Request) {
+	agents.HandleFunc("DELETE /agents/{id}/branch", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if err := branch.DeleteAgentBranch(id); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
@@ -56,21 +61,29 @@ func Serve(addr string) error {
 		writeJSON(w, http.StatusOK, map[string]string{"agent": id, "status": "deleted"})
 	})
 
-	log.Printf("agent branch API listening on %s", addr)
-	return http.ListenAndServe(addr, cors(logging(mux)))
+	protected := store.Authn(agents)
+	mux.Handle("/agents", protected)
+	mux.Handle("/agents/", protected)
+
+	log.Printf("agent branch API listening on %s (auth on)", addr)
+	return http.ListenAndServe(addr, cors(store.WebOrigin())(logging(mux)))
 }
 
-func cors(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+func cors(origin string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

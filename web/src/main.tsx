@@ -1,12 +1,23 @@
-import React, { useState } from 'react'
+import React, { useState, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { createBrowserRouter, RouterProvider, NavLink, Outlet, Link } from 'react-router-dom'
+import { createBrowserRouter, RouterProvider, NavLink, Outlet, Link, Navigate } from 'react-router-dom'
 import './styles.css'
 import { getTheme, toggleTheme } from './theme'
+import { logout as apiLogout } from './api'
+import { AuthProvider, useAuth } from './auth-context'
 import Landing from './pages/Landing'
 import Docs from './pages/Docs'
 import Dashboard from './pages/Dashboard'
 import Console from './pages/Console'
+import Login from './pages/Login'
+import ApiKeys from './pages/ApiKeys'
+
+function RequireAuth({ children }: { children: ReactNode }) {
+  const { user, loading } = useAuth()
+  if (loading) return <div className="container muted">Loading…</div>
+  if (!user) return <Navigate to="/login" replace />
+  return <>{children}</>
+}
 
 export function Mark({ size = 26 }: { size?: number }) {
   return (
@@ -30,13 +41,20 @@ export function Mark({ size = 26 }: { size?: number }) {
 function ThemeToggle() {
   const [theme, setTheme] = useState(getTheme())
   return (
-    <button
-      className="theme-toggle"
-      title="Toggle theme"
-      onClick={() => setTheme(toggleTheme())}
-    >
+    <button className="theme-toggle" title="Toggle theme" onClick={() => setTheme(toggleTheme())}>
       {theme === 'dark' ? '☀' : '☾'}
     </button>
+  )
+}
+
+function UserMenu() {
+  const { user, setUser } = useAuth()
+  if (!user) return <NavLink to="/login" className="btn ghost" style={{ padding: '6px 12px' }}>Log in</NavLink>
+  return (
+    <div className="usermenu">
+      <NavLink to="/keys" title="API keys" className="muted" style={{ fontSize: 13 }}>{user.email}</NavLink>
+      <button className="ghost" onClick={async () => { await apiLogout().catch(() => {}); setUser(null); location.assign('/login') }}>Logout</button>
+    </div>
   )
 }
 
@@ -50,9 +68,11 @@ function Layout() {
           <NavLink to="/docs">Docs</NavLink>
           <NavLink to="/dashboard">Dashboard</NavLink>
           <NavLink to="/console">Console</NavLink>
+          <NavLink to="/keys">API keys</NavLink>
         </div>
         <div className="right">
-          <a href="https://github.com/SauravYadav12/vectoraDB" target="_blank" rel="noreferrer" className="links"><span style={{ color: 'var(--muted)' }}>GitHub ↗</span></a>
+          <a href="https://github.com/SauravYadav12/vectoraDB" target="_blank" rel="noreferrer" className="muted" style={{ fontSize: 13 }}>GitHub ↗</a>
+          <UserMenu />
           <ThemeToggle />
         </div>
       </header>
@@ -75,14 +95,18 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <Landing /> },
       { path: 'docs', element: <Docs /> },
-      { path: 'dashboard', element: <Dashboard /> },
-      { path: 'console', element: <Console /> },
+      { path: 'login', element: <Login /> },
+      { path: 'dashboard', element: <RequireAuth><Dashboard /></RequireAuth> },
+      { path: 'console', element: <RequireAuth><Console /></RequireAuth> },
+      { path: 'keys', element: <RequireAuth><ApiKeys /></RequireAuth> },
     ],
   },
 ])
 
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <RouterProvider router={router} />
+    <AuthProvider>
+      <RouterProvider router={router} />
+    </AuthProvider>
   </React.StrictMode>,
 )

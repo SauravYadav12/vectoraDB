@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package controlplane serves VectoraDB's management REST API (JSON only). The
-// web UI is a separate app (see web/) that consumes this API.
+// Package controlplane serves VectoraDB's management REST API (JSON only),
+// gated by internal/auth. The web UI is a separate app (see web/).
 package controlplane
 
 import (
@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
 	"github.com/vectoradb/vectoradb/internal/daemon"
 )
@@ -23,8 +24,24 @@ var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
 
 // Serve starts the control-plane REST API on addr (e.g. ":8080").
 func Serve(addr string) error {
-	mux := http.NewServeMux()
+	store, err := auth.OpenFromEnv()
+	if err != nil {
+		return err
+	}
 
+	mux := http.NewServeMux()
+	store.MountPublic(mux) // /auth/* (register, login, logout, me, providers, oauth)
+
+	api := http.NewServeMux()
+	registerAPI(api)
+	store.MountKeys(api) // /api/keys (protected via Authn below)
+	mux.Handle("/api/", store.Authn(api))
+
+	log.Printf("control-plane API on %s (auth on; UI origin %s)", addr, store.WebOrigin())
+	return http.ListenAndServe(addr, cors(store.WebOrigin())(logging(mux)))
+}
+
+func registerAPI(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		bs, err := branch.Branches()
 		if err != nil {
@@ -131,9 +148,6 @@ func Serve(addr string) error {
 		}
 		writeJSON(w, 200, runQuery(addr, body.SQL))
 	})
-
-	log.Printf("control-plane API on %s", addr)
-	return http.ListenAndServe(addr, cors(logging(mux)))
 }
 
 // runQuery executes SQL against a branch backend and returns columns/rows (or an
@@ -180,7 +194,6 @@ func runQuery(addr, sql string) map[string]any {
 	return map[string]any{"columns": cols, "rows": out, "command": rows.CommandTag().String()}
 }
 
-// cell renders a value as something JSON-safe and readable.
 func cell(v any) any {
 	switch t := v.(type) {
 	case nil, bool, string, int16, int32, int64, float32, float64:
@@ -192,17 +205,23 @@ func cell(v any) any {
 	}
 }
 
-func cors(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// cors echoes the specific UI origin and allows credentials (cookies), which
+// forbids the "*" wildcard.
+func cors(origin string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

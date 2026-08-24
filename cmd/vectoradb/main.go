@@ -7,11 +7,14 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/vectoradb/vectoradb/internal/agentapi"
+	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
 	"github.com/vectoradb/vectoradb/internal/controlplane"
 	"github.com/vectoradb/vectoradb/internal/daemon"
@@ -67,6 +70,12 @@ Serverless front door:
 
 Agent Branch API:
   serve [--addr :8088] Run the HTTP API: one database branch per AI agent
+
+Auth (admin):
+  user create <email>            Create an account (prompts for a password)
+  apikey create <email> [name]   Mint an API key (shown once)
+  apikey list <email>            List a user's API keys
+  apikey revoke <email> <id>     Revoke an API key
 
   version              Print the vectoradb version
 `
@@ -150,6 +159,14 @@ func main() {
 		branchCmd(os.Args[2:])
 	case "ha":
 		haCmd(os.Args[2:])
+	case "user":
+		if len(os.Args) < 4 || os.Args[2] != "create" {
+			fmt.Println("usage: vectoradb user create <email>")
+			os.Exit(2)
+		}
+		must(userCreate(os.Args[3]))
+	case "apikey":
+		apikeyCmd(os.Args[2:])
 	case "serve":
 		must(agentapi.Serve(addrFlag(os.Args[2:], ":8088")))
 	case "controlplane":
@@ -263,5 +280,68 @@ func must(err error) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
+	}
+}
+
+func openStore() *auth.Store {
+	s, err := auth.OpenFromEnv()
+	must(err)
+	return s
+}
+
+func userCreate(email string) error {
+	fmt.Print("password (min 8 chars): ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	pw := strings.TrimSpace(line)
+	if len(pw) < 8 {
+		return fmt.Errorf("password must be at least 8 characters")
+	}
+	u, err := openStore().CreateUser(email, pw)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("created user %s (id %d)\n", u.Email, u.ID)
+	return nil
+}
+
+func apikeyCmd(args []string) {
+	if len(args) < 2 {
+		fmt.Println("usage: vectoradb apikey <create|list|revoke> <email> [name|id]")
+		os.Exit(2)
+	}
+	s := openStore()
+	u, ok := s.UserByEmail(args[1])
+	if !ok {
+		must(fmt.Errorf("no such user: %s (create it with: vectoradb user create %s)", args[1], args[1]))
+	}
+	switch args[0] {
+	case "create":
+		name := "key"
+		if len(args) > 2 {
+			name = args[2]
+		}
+		secret, info, err := s.CreateAPIKey(u.ID, name)
+		must(err)
+		fmt.Printf("API key %q created — copy it now, it won't be shown again:\n\n  %s\n", info.Name, secret)
+	case "list":
+		keys, err := s.ListKeys(u.ID)
+		must(err)
+		if len(keys) == 0 {
+			fmt.Println("no API keys")
+			return
+		}
+		for _, k := range keys {
+			fmt.Printf("  %s  %-16s  %s…\n", k.ID, k.Name, k.Prefix)
+		}
+	case "revoke":
+		if len(args) < 3 {
+			fmt.Println("usage: vectoradb apikey revoke <email> <id>")
+			os.Exit(2)
+		}
+		must(s.RevokeKey(u.ID, args[2]))
+		fmt.Println("revoked")
+	default:
+		fmt.Printf("unknown apikey subcommand: %s\n", args[0])
+		os.Exit(2)
 	}
 }
