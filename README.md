@@ -24,8 +24,17 @@ Go.
   suspend / resume / delete branches from the browser).
 - **Phase 4 — High availability:** ✅ a hot standby streams from the primary;
   `ha failover` promotes it and the proxy reroutes `main` transparently.
-- **Later:** test suite, developer docs site; control-plane polish (multi-tenant
-  projects, auth).
+- **Phase 5 — tests:** ✅ Go unit tests + a VM integration test.
+- **Phase 6 — docs & packaging:** ✅ in-app docs site at `/docs`, a demo script,
+  and a storage metric.
+- **Later (optional):** control-plane polish — multi-tenant projects, auth/API keys.
+
+## Documentation & demo
+
+- **In-app docs site** — once running, open **http://localhost:8080/docs**: setup,
+  start, and a full walkthrough with copy-paste commands and a live API playground.
+- **Guided demo** — `lima bash scripts/demo.sh` runs a narrated feature tour.
+- **Architecture (plain English)** — [`docs/vectoradb-architecture.pdf`](docs/vectoradb-architecture.pdf).
 
 ## Architecture (dev)
 

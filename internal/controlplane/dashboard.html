@@ -82,6 +82,7 @@
     Connect through the proxy: <span class="mono">postgres://vectoradb:vectoradb@localhost:6432/&lt;branch&gt;</span>
     &nbsp;·&nbsp; Web SQL console: <a href="http://localhost:8081" target="_blank">:8081</a>
     &nbsp;·&nbsp; Object storage: <a href="http://localhost:9001" target="_blank">:9001</a>
+    &nbsp;·&nbsp; <a href="/docs">Docs</a>
     &nbsp;·&nbsp; auto-refreshing
   </div>
 </div>
@@ -115,7 +116,8 @@ async function refresh(){
       card('Agent DBs', st.agents) +
       card('Proxy', dot(st.servers.proxy)+(st.servers.proxy?'Up':'Down')) +
       card('Agent API', dot(st.servers.api)+(st.servers.api?'Up':'Down')) +
-      card('Replica', ha(st.ha));
+      card('Replica', ha(st.ha)) +
+      card('Storage', (st.storage&&st.storage.used)?st.storage.used:'—');
     br.sort((a,b)=>(a.primary?-1:b.primary?1:a.name.localeCompare(b.name)));
     $('#rows').innerHTML = br.map(row).join('') || '<tr><td colspan="7" class="sub">no branches yet</td></tr>';
   }catch(e){ toast(e.message); }

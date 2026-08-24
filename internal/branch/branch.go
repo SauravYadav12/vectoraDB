@@ -540,6 +540,24 @@ func Branches() ([]BranchInfo, error) {
 	return infos, nil
 }
 
+// Storage summarises pool usage for the dashboard.
+type Storage struct {
+	Used  string `json:"used"`
+	Avail string `json:"avail"`
+}
+
+// StorageInfo reports ZFS pool usage.
+func StorageInfo() Storage {
+	out, err := capture("zfs", "list", "-H", "-o", "used,avail", "vectoradb")
+	if err != nil {
+		return Storage{}
+	}
+	if f := strings.Fields(out); len(f) >= 2 {
+		return Storage{Used: f[0], Avail: f[1]}
+	}
+	return Storage{}
+}
+
 // --- auto-suspend / auto-resume ---
 
 // ContainerState returns "running", "exited"/"created", or "absent".

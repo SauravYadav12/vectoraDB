@@ -19,6 +19,9 @@ import (
 //go:embed dashboard.html
 var dashboardHTML []byte
 
+//go:embed docs.html
+var docsHTML []byte
+
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
 
 // Serve starts the control plane + dashboard on addr (e.g. ":8080").
@@ -28,6 +31,11 @@ func Serve(addr string) error {
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(dashboardHTML)
+	})
+
+	mux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(docsHTML)
 	})
 
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +61,7 @@ func Serve(addr string) error {
 			"branches":  nBranch,
 			"agents":    nAgent,
 			"ha":        branch.HAInfo(),
+			"storage":   branch.StorageInfo(),
 			"servers": map[string]bool{
 				"proxy": daemon.Alive("proxy"),
 				"api":   daemon.Alive("api"),
