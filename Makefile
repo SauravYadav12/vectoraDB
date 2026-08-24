@@ -16,3 +16,9 @@ fmt:              ## list files needing gofmt
 
 vm-build:         ## Build the Linux binary inside the Lima VM to /tmp/vectoradb
 	lima bash -c 'cd "$(CURDIR)" && go build -o /tmp/vectoradb ./cmd/vectoradb'
+
+test:             ## Run unit tests (host, no VM needed)
+	go test ./...
+
+integration:      ## Run the full end-to-end integration test in the Lima VM
+	lima bash -c 'cd "$(CURDIR)" && go build -o /tmp/vectoradb ./cmd/vectoradb' && lima bash "$(CURDIR)/scripts/integration_test.sh"

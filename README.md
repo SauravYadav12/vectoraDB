@@ -182,6 +182,19 @@ vectoradb ha disable     # remove the standby
 > rerouting). Production HA additionally needs multi-host deployment, automatic
 > failure detection, and fencing against split-brain.
 
+## Testing
+
+```bash
+make test          # Go unit tests (host, no VM needed)
+make integration   # full end-to-end test inside the Lima VM
+```
+
+Unit tests cover the pure logic (PostgreSQL wire-protocol startup parse/rewrite,
+CLI flag parsing, branch-name validation, port parsing, DSN building). The
+integration test drives the real lifecycle and asserts each outcome — branch
+isolation, PITR, suspend/resume, the agent API, and HA failover — plus a
+regression check that the auto-suspend reaper never stops the standby.
+
 ## License
 
 - **Core / server** (this repo, except `clients/`): **AGPL-3.0-or-later** — see

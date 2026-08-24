@@ -405,6 +405,12 @@ func portOf(cont string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return parsePublishedPort(out)
+}
+
+// parsePublishedPort extracts the host port from `docker port` output such as
+// "0.0.0.0:32781\n[::]:32781".
+func parsePublishedPort(out string) (string, error) {
 	line := out
 	if i := strings.IndexByte(out, '\n'); i >= 0 {
 		line = out[:i]
@@ -413,7 +419,7 @@ func portOf(cont string) (string, error) {
 	if i < 0 || i+1 >= len(line) {
 		return "", fmt.Errorf("could not parse published port from %q", out)
 	}
-	return line[i+1:], nil
+	return strings.TrimSpace(line[i+1:]), nil
 }
 
 func branchPort(name string) (string, error) { return portOf(container(name)) }
