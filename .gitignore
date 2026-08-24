@@ -1,0 +1,21 @@
+# Binaries
+/bin/
+/vectoradb
+*.exe
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Local data / logs
+/data/
+*.log
+
+# Personal env overrides (walg.env holds only local dev defaults and is committed)
+.env.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

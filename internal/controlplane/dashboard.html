@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VectoraDB</title>
+<style>
+  :root{
+    --bg:#0b0f17; --panel:#131a26; --panel2:#0f1621; --border:#223047;
+    --text:#e6edf6; --muted:#8b98a9; --accent:#4f8cff;
+    --green:#34d399; --amber:#fbbf24; --red:#f87171; --teal:#2dd4bf;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.5}
+  .wrap{max-width:1040px;margin:0 auto;padding:28px 20px 60px}
+  header{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px}
+  h1{font-size:26px;margin:0;letter-spacing:-.01em}
+  .brandmark{color:var(--accent)}
+  .sub{color:var(--muted);font-size:14px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:20px 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+  .card .v{font-size:22px;font-weight:600;margin-top:4px;display:flex;align-items:center;gap:8px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .dot.up{background:var(--green)} .dot.down{background:var(--red)}
+  .bar{display:flex;gap:10px;align-items:center;margin:18px 0 10px}
+  input{background:var(--panel2);border:1px solid var(--border);color:var(--text);
+    border-radius:9px;padding:9px 12px;font-size:14px;min-width:220px}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{background:var(--accent);color:#fff;border:none;border-radius:9px;
+    padding:9px 14px;font-size:14px;font-weight:600;cursor:pointer}
+  button:hover{filter:brightness(1.08)} button:disabled{opacity:.5;cursor:default}
+  button.ghost{background:transparent;border:1px solid var(--border);color:var(--text);font-weight:500;padding:6px 10px;font-size:13px}
+  button.ghost:hover{border-color:var(--accent)}
+  button.danger{color:var(--red)} button.danger:hover{border-color:var(--red)}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th{text-align:left;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;
+    padding:8px 10px;border-bottom:1px solid var(--border)}
+  td{padding:11px 10px;border-bottom:1px solid var(--border);font-size:14px;vertical-align:middle}
+  .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid var(--border)}
+  .badge.primary{color:var(--accent);border-color:#274a86}
+  .badge.agent{color:var(--teal);border-color:#1c6b60}
+  .badge.branch{color:var(--muted)}
+  .state{display:inline-flex;align-items:center;gap:7px;font-weight:600}
+  .state.running{color:var(--green)} .state.suspended{color:var(--muted)}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:var(--muted)}
+  .actions{display:flex;gap:6px;justify-content:flex-end}
+  .foot{color:var(--muted);font-size:12px;margin-top:16px}
+  #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+    background:#2a1518;border:1px solid var(--red);color:#ffd7d7;padding:10px 16px;
+    border-radius:10px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none}
+  #toast.show{opacity:1}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Vectora<span class="brandmark">DB</span></h1>
+    <span class="sub">Serverless Postgres · instant branches · time-travel · a database per AI agent</span>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="bar">
+    <input id="newname" placeholder="new branch name (e.g. qa)" autocomplete="off"
+           onkeydown="if(event.key==='Enter')createBranch()">
+    <button onclick="createBranch()">Create branch</button>
+    <span class="sub" id="hint"></span>
+  </div>
+
+  <table>
+    <thead><tr>
+      <th>Branch</th><th>Type</th><th>State</th><th>Size (CoW)</th><th>Conns</th>
+      <th>Connection string</th><th></th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <div class="foot">
+    Connect through the proxy: <span class="mono">postgres://vectoradb:vectoradb@localhost:6432/&lt;branch&gt;</span>
+    &nbsp;·&nbsp; Web SQL console: <a href="http://localhost:8081" target="_blank">:8081</a>
+    &nbsp;·&nbsp; Object storage: <a href="http://localhost:9001" target="_blank">:9001</a>
+    &nbsp;·&nbsp; auto-refreshing
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');
+  clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),3500);}
+async function api(method,path,body){
+  const r=await fetch(path,{method,headers:body?{'Content-Type':'application/json'}:{},
+    body:body?JSON.stringify(body):undefined});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(data.error||('HTTP '+r.status));
+  return data;
+}
+function dot(up){return '<span class="dot '+(up?'up':'down')+'"></span>';}
+function card(k,v){return '<div class="card"><div class="k">'+k+'</div><div class="v">'+v+'</div></div>';}
+function ha(h){
+  if(!h||!h.enabled) return '<span style="font-size:15px;color:var(--muted)">none</span>';
+  if(h.streaming)   return dot(true)+'<span style="font-size:16px">streaming</span>';
+  return dot(false)+'<span style="font-size:16px">'+(h.standby||'down')+'</span>';
+}
+
+async function refresh(){
+  try{
+    const [st,br]=await Promise.all([api('GET','/api/status'),api('GET','/api/branches')]);
+    $('#cards').innerHTML =
+      card('Primary', dot(st.mainReady)+(st.mainReady?'Ready':'Down')) +
+      card('Branches', st.branches) +
+      card('Agent DBs', st.agents) +
+      card('Proxy', dot(st.servers.proxy)+(st.servers.proxy?'Up':'Down')) +
+      card('Agent API', dot(st.servers.api)+(st.servers.api?'Up':'Down')) +
+      card('Replica', ha(st.ha));
+    br.sort((a,b)=>(a.primary?-1:b.primary?1:a.name.localeCompare(b.name)));
+    $('#rows').innerHTML = br.map(row).join('') || '<tr><td colspan="7" class="sub">no branches yet</td></tr>';
+  }catch(e){ toast(e.message); }
+}
+function row(b){
+  const type = b.primary?'<span class="badge primary">primary</span>'
+             : b.agent?'<span class="badge agent">agent</span>'
+             : '<span class="badge branch">branch</span>';
+  const running = b.state==='running';
+  const state = '<span class="state '+(running?'running':'suspended')+'">'+
+    dot(running)+(running?'running':'suspended')+'</span>';
+  const dsn = 'postgres://vectoradb:vectoradb@localhost:6432/'+b.name;
+  let actions='';
+  if(!b.primary){
+    actions += running
+      ? '<button class="ghost" onclick="act(\''+b.name+'\',\'suspend\',\'POST\')">Suspend</button>'
+      : '<button class="ghost" onclick="act(\''+b.name+'\',\'resume\',\'POST\')">Resume</button>';
+    actions += '<button class="ghost danger" onclick="del(\''+b.name+'\')">Delete</button>';
+  }
+  return '<tr>'+
+    '<td><b>'+b.name+'</b></td>'+
+    '<td>'+type+'</td>'+
+    '<td>'+state+'</td>'+
+    '<td>'+(b.used||'—')+'</td>'+
+    '<td>'+(running?b.connections:'—')+'</td>'+
+    '<td><span class="mono" title="click to copy" style="cursor:pointer" onclick="copy(\''+dsn+'\')">'+dsn+'</span></td>'+
+    '<td><div class="actions">'+actions+'</div></td>'+
+    '</tr>';
+}
+async function createBranch(){
+  const el=$('#newname'); const name=el.value.trim();
+  if(!name) return;
+  $('#hint').textContent='creating '+name+'…';
+  try{ await api('POST','/api/branches',{name}); el.value=''; $('#hint').textContent=''; await refresh(); }
+  catch(e){ $('#hint').textContent=''; toast(e.message); }
+}
+async function act(name,verb){
+  try{ await api('POST','/api/branches/'+name+'/'+verb); await refresh(); }
+  catch(e){ toast(e.message); }
+}
+async function del(name){
+  if(!confirm('Delete branch "'+name+'"? This destroys its data.')) return;
+  try{ await api('DELETE','/api/branches/'+name); await refresh(); }
+  catch(e){ toast(e.message); }
+}
+function copy(t){navigator.clipboard&&navigator.clipboard.writeText(t);toast('copied connection string');}
+refresh(); setInterval(refresh,3000);
+</script>
+</body>
+</html>
