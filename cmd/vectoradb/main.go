@@ -21,9 +21,9 @@ import (
 
 // background services managed by `start`/`stop` (name -> subcommand + flags).
 var services = map[string][]string{
-	"dashboard": {"dashboard", "--addr", ":8080"},
-	"proxy":     {"proxy", "--addr", ":6432", "--idle", "2m"},
-	"api":       {"serve", "--addr", ":8088"},
+	"controlplane": {"controlplane", "--addr", ":8080"},
+	"proxy":        {"proxy", "--addr", ":6432", "--idle", "2m"},
+	"api":          {"serve", "--addr", ":8088"},
 }
 
 const usage = `VectoraDB — serverless Postgres control CLI
@@ -32,14 +32,13 @@ Usage:
   vectoradb <command> [args]
 
 Stack:
-  start                Bring EVERYTHING up in the background: stack + proxy + API + console
+  start                Bring EVERYTHING up in the background: stack + proxy + APIs
   stop                 Stop background servers and all containers
   up                   Bring up the stack: network + MinIO + primary 'main' (archiving)
   down                 Stop MinIO and all Postgres containers (ZFS data preserved)
   status               Show servers, main readiness, stored backups, and branches
   logs [proxy|api]     Print a background server's log
   psql                 Open a psql shell on the primary 'main'
-  console [branch]     Web SQL console (pgweb) at http://localhost:8081
 
 Durability / time-travel:
   backup create        Base backup of 'main' -> object storage
@@ -63,8 +62,8 @@ Serverless front door:
   proxy [--addr :6432] [--idle 2m]
                        Wire-protocol proxy: route by dbname=<branch>, auto-resume
                        suspended branches, auto-suspend idle ones (--idle 0 = off)
-  dashboard [--addr :8080]
-                       Management REST API + web dashboard
+  controlplane [--addr :8080]
+                       Control-plane REST API (JSON; the web UI is a separate app in web/)
 
 Agent Branch API:
   serve [--addr :8088] Run the HTTP API: one database branch per AI agent
@@ -86,20 +85,19 @@ func main() {
 		for name, args := range services {
 			must(daemon.Start(name, args))
 		}
-		must(branch.Console("main"))
 		fmt.Println("\nVectoraDB is up (background):")
-		fmt.Println("  dashboard  http://localhost:8080   <- start here")
-		fmt.Println("  proxy      postgres://vectoradb:vectoradb@localhost:6432/<branch>")
-		fmt.Println("  agent API  http://localhost:8088   (POST /agents/{id}/branch)")
-		fmt.Println("  console    http://localhost:8081")
-		fmt.Println("  storage    http://localhost:9001   (minioadmin/minioadmin)")
-		fmt.Println("\nStop everything with: vectoradb stop")
+		fmt.Println("  control API  http://localhost:8080/api/status")
+		fmt.Println("  agent API    http://localhost:8088   (POST /agents/{id}/branch)")
+		fmt.Println("  proxy (SQL)  postgres://vectoradb:vectoradb@localhost:6432/<branch>")
+		fmt.Println("  storage      http://localhost:9001   (minioadmin/minioadmin)")
+		fmt.Println("\nWeb UI is a separate app — run it with:  make web-dev   (http://localhost:5173)")
+		fmt.Println("Stop everything with: vectoradb stop")
 	case "stop":
 		for name := range services {
 			daemon.Stop(name)
 		}
 		must(branch.Down())
-		fmt.Println("stopped: proxy, agent API, console, and all containers")
+		fmt.Println("stopped: control API, agent API, proxy, and all containers")
 	case "logs":
 		svc := "proxy"
 		if len(os.Args) > 2 {
@@ -120,18 +118,13 @@ func main() {
 		must(branch.Down())
 	case "status":
 		fmt.Println("=== servers ===")
+		fmt.Printf("control API: %s\n", daemon.Status("controlplane"))
 		fmt.Printf("proxy: %s\n", daemon.Status("proxy"))
 		fmt.Printf("agent API: %s\n", daemon.Status("api"))
 		fmt.Println()
 		must(branch.Status())
 	case "psql":
 		must(branch.PsqlShell("main"))
-	case "console":
-		name := ""
-		if len(os.Args) > 2 {
-			name = os.Args[2]
-		}
-		must(branch.Console(name))
 	case "backup":
 		if len(os.Args) < 3 {
 			fmt.Println("usage: vectoradb backup <create|list>")
@@ -159,7 +152,7 @@ func main() {
 		haCmd(os.Args[2:])
 	case "serve":
 		must(agentapi.Serve(addrFlag(os.Args[2:], ":8088")))
-	case "dashboard":
+	case "controlplane":
 		must(controlplane.Serve(addrFlag(os.Args[2:], ":8080")))
 	case "proxy":
 		must(proxy.Serve(addrFlag(os.Args[2:], ":6432"), durFlag(os.Args[2:], "--idle", 2*time.Minute)))

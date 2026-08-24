@@ -11,7 +11,7 @@ say() { echo; echo "──▶ $*"; echo; }
 sql() { psql "$PROXY/$1" -c "$2"; }
 pg()  { sudo docker exec -e PGPASSWORD=vectoradb "$1" psql -U vectoradb -d vectoradb "${@:2}"; }
 
-say "Bringing VectoraDB up (stack + proxy + agent API + console + dashboard)"
+say "Bringing VectoraDB up (stack + proxy + control API + agent API)"
 $S start >/dev/null 2>&1; sleep 4
 $S status 2>&1 | sed -n '1,12p'
 
@@ -48,4 +48,4 @@ curl -s -X DELETE localhost:8088/agents/alice/branch >/dev/null
 $S ha disable >/dev/null 2>&1; $S up >/dev/null 2>&1
 $S branch delete demo >/dev/null 2>&1
 echo
-echo "Done.  Dashboard: http://localhost:8080   ·   Docs: http://localhost:8080/docs"
+echo "Done.  Control API: http://localhost:8080/api/status   ·   Web UI: make web-dev (http://localhost:5173)"

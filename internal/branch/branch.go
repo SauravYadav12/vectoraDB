@@ -277,28 +277,6 @@ func Down() error {
 	return nil
 }
 
-// Console runs a pgweb web UI (on http://localhost:8081) connected to a branch
-// (default "main"), so you can browse tables and run SQL from a browser.
-func Console(name string) error {
-	if name == "" {
-		name = "main"
-	}
-	if !datasetExists(dataset(name)) {
-		return fmt.Errorf("branch %q does not exist", name)
-	}
-	quiet("docker", "rm", "-f", "vectoradb-console")
-	url := fmt.Sprintf("postgres://%s:%s@%s:5432/%s?sslmode=disable",
-		pgUser, pgPassword, container(name), pgDatabase)
-	if err := run("docker", "run", "-d", "--name", "vectoradb-console",
-		"--network", network, "-p", "8081:8081",
-		"-e", "PGWEB_DATABASE_URL="+url,
-		"sosedoff/pgweb:latest"); err != nil {
-		return err
-	}
-	fmt.Printf("database console → http://localhost:8081  (connected to branch %q)\n", name)
-	return nil
-}
-
 // Backup takes a base backup of main and pushes it to object storage.
 func Backup() error {
 	return run("docker", "exec",

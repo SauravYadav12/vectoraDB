@@ -19,20 +19,20 @@ Go.
   fully isolated; plus the **Agent Branch API** (one database per AI agent).
 - **Phase 3 — serverless front door:** ✅ wire-protocol proxy (one endpoint,
   route by database name), **auto-suspend/resume** (idle branches stop; the
-  proxy wakes them on connect), **background/daemon mode** (`start`/`stop`), a
-  **web SQL console**, and a **control-plane REST API + dashboard** (create /
-  suspend / resume / delete branches from the browser).
+  proxy wakes them on connect), **background/daemon mode** (`start`/`stop`), and
+  a **control-plane REST API**.
 - **Phase 4 — High availability:** ✅ a hot standby streams from the primary;
   `ha failover` promotes it and the proxy reroutes `main` transparently.
 - **Phase 5 — tests:** ✅ Go unit tests + a VM integration test.
-- **Phase 6 — docs & packaging:** ✅ in-app docs site at `/docs`, a demo script,
-  and a storage metric.
+- **Phase 6 — docs & packaging:** ✅ demo script, storage metric, architecture PDF.
+- **Phase 7 — web app:** ✅ a standalone **React + TypeScript** UI in `web/`
+  (landing, docs, dashboard, SQL console) consuming the REST API.
 - **Later (optional):** control-plane polish — multi-tenant projects, auth/API keys.
 
 ## Documentation & demo
 
-- **In-app docs site** — once running, open **http://localhost:8080/docs**: setup,
-  start, and a full walkthrough with copy-paste commands and a live API playground.
+- **Web app** — `make web-dev`, then open **http://localhost:5173** for the
+  landing page, docs, ops dashboard, and SQL console.
 - **Guided demo** — `lima bash scripts/demo.sh` runs a narrated feature tour.
 - **Architecture (plain English)** — [`docs/vectoradb-architecture.pdf`](docs/vectoradb-architecture.pdf).
 
@@ -76,24 +76,29 @@ lima /tmp/vectoradb logs proxy
 lima /tmp/vectoradb stop      # stop servers + containers
 ```
 
-Then, from your Mac (Lima forwards the ports), open the **dashboard** —
-**http://localhost:8080** — to see status and create/suspend/resume/delete
-branches by clicking. Other endpoints: proxy
-`postgres://vectoradb:vectoradb@localhost:6432/<branch>` · agent API
-http://localhost:8088 · SQL console http://localhost:8081 · storage
-http://localhost:9001.
+Then run the **web UI** — a separate React app in `web/` — against the API:
 
-### Dashboard & control-plane API
+```bash
+make web-dev   # http://localhost:5173  (Landing · Docs · Dashboard · SQL Console)
+```
 
-The dashboard (`vectoradb dashboard`, port `:8080`) is a web UI over a small REST
-API — live status cards plus a table of branches with one-click actions. The API
-is usable directly:
+Other endpoints: control API `http://localhost:8080/api`, proxy
+`postgres://vectoradb:vectoradb@localhost:6432/<branch>`, agent API
+`http://localhost:8088`, object storage `http://localhost:9001`.
+
+### Web app (`web/`)
+
+The UI is a standalone **Vite + React + TypeScript** app that consumes the
+control-plane REST API — it is **not** embedded in the Go binary. It has a
+landing page, docs, an ops **dashboard** (live status + branch CRUD), and a
+**SQL console**. Run it with `make web-dev`; point it at a different API with
+`VITE_API_URL`. The API is also usable directly:
 
 ```bash
 curl localhost:8080/api/status
 curl localhost:8080/api/branches
 curl -X POST localhost:8080/api/branches -d '{"name":"qa"}'
-curl -X POST localhost:8080/api/branches/qa/suspend
+curl -X POST localhost:8080/api/branches/qa/query -d '{"sql":"SELECT 1"}'
 curl -X DELETE localhost:8080/api/branches/qa
 ```
 
@@ -111,17 +116,10 @@ lima /tmp/vectoradb branch create qa   # instant copy-on-write branch
 lima /tmp/vectoradb branch list
 lima /tmp/vectoradb branch delete qa
 
-lima /tmp/vectoradb console            # web SQL console -> http://localhost:8081
 lima /tmp/vectoradb proxy --addr :6432 # one endpoint; route with dbname=<branch>
 
 lima /tmp/vectoradb down               # stop containers (ZFS datasets preserved)
 ```
-
-### Web console (try your DB in a browser)
-
-`vectoradb console [branch]` runs a pgweb UI connected to a branch (default
-`main`). Open **http://localhost:8081** on your Mac — browse tables, run SQL, no
-setup.
 
 ### Single endpoint (serverless front door)
 

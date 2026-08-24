@@ -1,42 +1,29 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package controlplane serves VectoraDB's management REST API and web dashboard.
+// Package controlplane serves VectoraDB's management REST API (JSON only). The
+// web UI is a separate app (see web/) that consumes this API.
 package controlplane
 
 import (
-	_ "embed"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/vectoradb/vectoradb/internal/branch"
 	"github.com/vectoradb/vectoradb/internal/daemon"
 )
 
-//go:embed dashboard.html
-var dashboardHTML []byte
-
-//go:embed docs.html
-var docsHTML []byte
-
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
 
-// Serve starts the control plane + dashboard on addr (e.g. ":8080").
+// Serve starts the control-plane REST API on addr (e.g. ":8080").
 func Serve(addr string) error {
 	mux := http.NewServeMux()
-
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(dashboardHTML)
-	})
-
-	mux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(docsHTML)
-	})
 
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		bs, err := branch.Branches()
@@ -126,8 +113,96 @@ func Serve(addr string) error {
 		writeJSON(w, 200, map[string]string{"status": "resumed"})
 	})
 
-	log.Printf("control plane + dashboard on %s", addr)
-	return http.ListenAndServe(addr, logging(mux))
+	// Run SQL against a branch (powers the web SQL console).
+	mux.HandleFunc("POST /api/branches/{name}/query", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		var body struct {
+			SQL string `json:"sql"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if strings.TrimSpace(body.SQL) == "" {
+			writeErr(w, 400, fmt.Errorf("sql is required"))
+			return
+		}
+		addr, err := branch.EnsureRunning(name)
+		if err != nil {
+			writeErr(w, 404, err)
+			return
+		}
+		writeJSON(w, 200, runQuery(addr, body.SQL))
+	})
+
+	log.Printf("control-plane API on %s", addr)
+	return http.ListenAndServe(addr, cors(logging(mux)))
+}
+
+// runQuery executes SQL against a branch backend and returns columns/rows (or an
+// error message the console can render). Capped and time-bounded.
+func runQuery(addr, sql string) map[string]any {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, fmt.Sprintf("postgres://vectoradb:vectoradb@%s/vectoradb", addr))
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	defer conn.Close(ctx)
+
+	rows, err := conn.Query(ctx, sql)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	defer rows.Close()
+
+	fds := rows.FieldDescriptions()
+	cols := make([]string, len(fds))
+	for i, f := range fds {
+		cols[i] = f.Name
+	}
+	out := [][]any{}
+	for rows.Next() {
+		if len(out) >= 1000 {
+			break
+		}
+		vals, err := rows.Values()
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		row := make([]any, len(vals))
+		for i, v := range vals {
+			row[i] = cell(v)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	return map[string]any{"columns": cols, "rows": out, "command": rows.CommandTag().String()}
+}
+
+// cell renders a value as something JSON-safe and readable.
+func cell(v any) any {
+	switch t := v.(type) {
+	case nil, bool, string, int16, int32, int64, float32, float64:
+		return v
+	case []byte:
+		return string(t)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

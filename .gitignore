@@ -19,3 +19,7 @@ coverage.*
 .DS_Store
 .idea/
 .vscode/
+
+# web app
+web/node_modules/
+web/dist/
