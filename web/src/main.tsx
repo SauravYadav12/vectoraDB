@@ -59,6 +59,7 @@ function UserMenu() {
 }
 
 function Layout() {
+  const { user } = useAuth()
   return (
     <>
       <header className="nav">
@@ -66,9 +67,11 @@ function Layout() {
         <div className="links">
           <NavLink to="/" end>Home</NavLink>
           <NavLink to="/docs">Docs</NavLink>
-          <NavLink to="/dashboard">Dashboard</NavLink>
-          <NavLink to="/console">Console</NavLink>
-          <NavLink to="/keys">API keys</NavLink>
+          {user && <>
+            <NavLink to="/dashboard">Dashboard</NavLink>
+            <NavLink to="/console">Console</NavLink>
+            <NavLink to="/keys">API keys</NavLink>
+          </>}
         </div>
         <div className="right">
           <a href="https://github.com/SauravYadav12/vectoraDB" target="_blank" rel="noreferrer" className="muted" style={{ fontSize: 13 }}>GitHub ↗</a>

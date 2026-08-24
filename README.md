@@ -46,34 +46,45 @@ Everything runs inside a single Linux VM (Lima) with ZFS + Docker:
 - `vec-<name>` — a branch: a `zfs clone` of main served by its own Postgres.
 - `vec-restore` — a disposable point-in-time restore target (port 5433).
 
-## Dev environment (macOS)
+## Install
+
+One line installs the `vdb` command; it sets up everything else for you — the
+Linux VM (on macOS), Docker, ZFS, the copy-on-write pool, and the image.
+
+**macOS** — needs [Lima](https://lima-vm.io) for the local VM:
 
 ```bash
 brew install lima
-limactl start --tty=false            # Ubuntu VM named "default"; repo is auto-mounted
-lima sudo apt-get update && lima sudo apt-get install -y zfsutils-linux docker.io golang-go
-# ZFS pool on a file vdev:
-lima sudo truncate -s 30G /var/lib/vectoradb-zpool.img
-lima sudo zpool create -f vectoradb /var/lib/vectoradb-zpool.img
-lima sudo zfs create vectoradb/branches
+curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+vdb setup
 ```
 
-Build the wal-g image and the CLI (inside the VM):
+**Linux**:
 
 ```bash
-lima bash -c 'cd "'"$PWD"'" && sudo docker build -t vectoradb/postgres-walg:16 docker/postgres && go build -o /tmp/vectoradb ./cmd/vectoradb'
+curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+sudo vdb start
 ```
 
-## Usage (run via `lima`)
+`vdb setup` (macOS) / `vdb start` (Linux) creates the VM, installs Docker + ZFS,
+builds the pool and image, and brings the database, proxy, and APIs up — no
+manual steps. On macOS, `vdb` transparently runs the engine inside the VM, so
+every command below is just `vdb …` with no `lima` prefix.
 
-**Fastest path — one command brings everything up in the background** (stack +
-proxy + agent API + console), detached, no terminal held open:
+> **Install from source (contributors):** clone the repo and `make vm-build`
+> (builds the Linux binary into the VM) or `make build` (host binary). See
+> [Development](#development).
+
+## Usage
+
+**One command brings everything up in the background** (stack + proxy + agent
+API), detached, no terminal held open:
 
 ```bash
-lima /tmp/vectoradb start    # everything up (background)
-lima /tmp/vectoradb status   # servers + main + branches
-lima /tmp/vectoradb logs proxy
-lima /tmp/vectoradb stop      # stop servers + containers
+vdb start    # everything up (background)
+vdb status   # servers + main + branches
+vdb logs proxy
+vdb stop      # stop servers + containers
 ```
 
 Then run the **web UI** — a separate React app in `web/` — against the API:
@@ -105,25 +116,25 @@ curl -X DELETE localhost:8080/api/branches/qa
 The individual commands below are for foreground/manual use:
 
 ```bash
-lima /tmp/vectoradb up                 # network + MinIO + primary 'main' (archiving)
-lima /tmp/vectoradb status             # readiness + backups + branches
+vdb up                 # network + MinIO + primary 'main' (archiving)
+vdb status             # readiness + backups + branches
 
-lima /tmp/vectoradb backup create      # base backup -> object storage
-lima /tmp/vectoradb restore --to latest        # PITR into a disposable container (port 5433)
-lima /tmp/vectoradb restore --to '2026-08-24 15:07:00+00'
+vdb backup create      # base backup -> object storage
+vdb restore --to latest        # PITR into a disposable container (port 5433)
+vdb restore --to '2026-08-24 15:07:00+00'
 
-lima /tmp/vectoradb branch create qa   # instant copy-on-write branch
-lima /tmp/vectoradb branch list
-lima /tmp/vectoradb branch delete qa
+vdb branch create qa   # instant copy-on-write branch
+vdb branch list
+vdb branch delete qa
 
-lima /tmp/vectoradb proxy --addr :6432 # one endpoint; route with dbname=<branch>
+vdb proxy --addr :6432 # one endpoint; route with dbname=<branch>
 
-lima /tmp/vectoradb down               # stop containers (ZFS datasets preserved)
+vdb down               # stop containers (ZFS datasets preserved)
 ```
 
 ### Single endpoint (serverless front door)
 
-`vectoradb proxy` exposes one PostgreSQL endpoint (`:6432`) and routes each
+`vdb proxy` exposes one PostgreSQL endpoint (`:6432`) and routes each
 connection to the branch named by the `database` parameter — so clients use one
 stable address instead of per-branch ports:
 
@@ -137,9 +148,9 @@ branch idle longer than `--idle` (default `2m`, `--idle 0` to disable) and
 transparently resumes it on the next connection:
 
 ```bash
-vectoradb proxy --addr :6432 --idle 90s   # idle branches stop; wake on connect
-vectoradb branch suspend qa               # manual stop (data preserved)
-vectoradb branch resume qa                # manual start
+vdb proxy --addr :6432 --idle 90s   # idle branches stop; wake on connect
+vdb branch suspend qa               # manual stop (data preserved)
+vdb branch resume qa                # manual start
 ```
 
 Suspended branches keep their data (only the container stops); resume takes a
@@ -157,7 +168,7 @@ MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`).
 Run the HTTP service:
 
 ```bash
-lima /tmp/vectoradb serve --addr :8088
+vdb serve --addr :8088
 ```
 
 Then each agent gets its own instant, isolated, disposable database:
@@ -179,15 +190,43 @@ isolation from `main` and other agents, and the branch is discarded on delete.
 primary failure.
 
 ```bash
-vectoradb ha enable      # standby streaming from main
-vectoradb ha status      # replication state + lag
-vectoradb ha failover    # promote standby; 'main' now routes to it
-vectoradb ha disable     # remove the standby
+vdb ha enable      # standby streaming from main
+vdb ha status      # replication state + lag
+vdb ha failover    # promote standby; 'main' now routes to it
+vdb ha disable     # remove the standby
 ```
 
 > Single-VM demonstration of the mechanism (replication → promotion →
 > rerouting). Production HA additionally needs multi-host deployment, automatic
 > failure detection, and fencing against split-brain.
+
+## Development
+
+Build from a source checkout instead of the installer:
+
+```bash
+make build       # host binary -> ./bin/vdb
+make vm-build    # Linux engine binary -> /tmp/vdb inside the Lima VM
+make release     # cross-compiled binaries -> ./dist (darwin+linux, amd64+arm64)
+```
+
+`make release` produces the artifacts the installer downloads; the ZFS pool and
+Docker image are created automatically on the first `vdb start`/`vdb up`.
+
+### Releasing (maintainers)
+
+Cut a versioned release so the installer one-liner can fetch prebuilt binaries:
+
+```bash
+make release VERSION=0.1.0                 # -> dist/vdb-{darwin,linux}-{amd64,arm64}
+gh release create v0.1.0 dist/* \
+  --title v0.1.0 --notes "First release"    # uploads the binaries as release assets
+```
+
+`deploy/install.sh` downloads `vdb-<os>-<arch>` from the **latest** release.
+For the public `curl … | sh` one-liner to work for others, the repository (and
+thus its releases) must be **public** — on a private repo, asset downloads
+require an authenticated GitHub token.
 
 ## Testing
 

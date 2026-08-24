@@ -5,7 +5,7 @@
 #   lima bash "/Users/.../Distributed Database/scripts/demo.sh"
 set -uo pipefail
 
-S="${VECTORADB_BIN:-/tmp/vectoradb}"
+S="${VECTORADB_BIN:-/tmp/vdb}"
 PROXY="postgres://vectoradb:vectoradb@127.0.0.1:6432"
 say() { echo; echo "──▶ $*"; echo; }
 sql() { psql "$PROXY/$1" -c "$2"; }

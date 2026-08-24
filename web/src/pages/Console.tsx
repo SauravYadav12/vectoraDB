@@ -24,7 +24,7 @@ export default function Console() {
     return (
       <>
         <h1>SQL Console</h1>
-        <div className="offline">Can’t reach the API at <code>{API}</code>. Start it with <code>lima /tmp/vectoradb start</code>.</div>
+        <div className="offline">Can’t reach the API at <code>{API}</code>. Start it with <code>vdb start</code>.</div>
       </>
     )
   }

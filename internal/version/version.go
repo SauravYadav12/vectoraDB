@@ -3,5 +3,6 @@
 // Package version holds the vectoradb build version.
 package version
 
-// Version is the current vectoradb version.
-const Version = "0.1.0-dev"
+// Version is the current vectoradb version. It is a var (not a const) so
+// release builds can stamp it via -ldflags "-X …version.Version=…".
+var Version = "0.1.0-dev"

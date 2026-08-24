@@ -1,12 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # VectoraDB runs inside the Linux dev VM (ZFS + Docker); day-to-day operation is
-# via `lima /tmp/vectoradb <command>`. This Makefile just builds/checks the CLI.
+# via `lima /tmp/vdb <command>`. This Makefile just builds/checks the CLI.
 
-.PHONY: build vet fmt vm-build test integration web-dev web-build
+.PHONY: build vet fmt vm-build test integration web-dev web-build release
 
-build:            ## Build the CLI into ./bin/vectoradb (host)
-	go build -o bin/vectoradb ./cmd/vectoradb
+VERSION ?= 0.1.0
+LDFLAGS := -s -w -X github.com/vectoradb/vectoradb/internal/version.Version=$(VERSION)
+
+build:            ## Build the CLI into ./bin/vdb (host)
+	go build -o bin/vdb ./cmd/vdb
+
+release:          ## Cross-compile release binaries into ./dist (darwin+linux, amd64+arm64)
+	@rm -rf dist && mkdir -p dist
+	@for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do \
+		os=$${t%/*}; arch=$${t#*/}; \
+		echo "  building vdb-$$os-$$arch"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+			go build -trimpath -ldflags "$(LDFLAGS)" -o dist/vdb-$$os-$$arch ./cmd/vdb; \
+	done
+	@echo "release binaries in ./dist (version $(VERSION))"
 
 vet:              ## go vet
 	go vet ./...
@@ -14,14 +27,14 @@ vet:              ## go vet
 fmt:              ## list files needing gofmt
 	gofmt -l cmd internal
 
-vm-build:         ## Build the Linux binary inside the Lima VM to /tmp/vectoradb
-	lima bash -c 'cd "$(CURDIR)" && go build -o /tmp/vectoradb ./cmd/vectoradb'
+vm-build:         ## Build the Linux binary inside the Lima VM to /tmp/vdb
+	lima bash -c 'cd "$(CURDIR)" && go build -o /tmp/vdb ./cmd/vdb'
 
 test:             ## Run unit tests (host, no VM needed)
 	go test ./...
 
 integration:      ## Run the full end-to-end integration test in the Lima VM
-	lima bash -c 'cd "$(CURDIR)" && go build -o /tmp/vectoradb ./cmd/vectoradb' && lima bash "$(CURDIR)/scripts/integration_test.sh"
+	lima bash -c 'cd "$(CURDIR)" && go build -o /tmp/vdb ./cmd/vdb' && lima bash "$(CURDIR)/scripts/integration_test.sh"
 
 web-dev:          ## Run the web UI dev server (http://localhost:5173) against the API
 	npm --prefix web install --no-audit --no-fund && npm --prefix web run dev

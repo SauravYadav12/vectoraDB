@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Command vectoradb is the control CLI for the vectoradb serverless-Postgres
+// Command vdb is the control CLI for the VectoraDB serverless-Postgres
 // platform. It runs inside the Linux dev VM (ZFS + Docker) and manages the
 // unified stack: object storage (MinIO), the primary Postgres ("main") with WAL
 // archiving, point-in-time restore, and instant copy-on-write branches.
@@ -18,6 +18,7 @@ import (
 	"github.com/vectoradb/vectoradb/internal/branch"
 	"github.com/vectoradb/vectoradb/internal/controlplane"
 	"github.com/vectoradb/vectoradb/internal/daemon"
+	"github.com/vectoradb/vectoradb/internal/host"
 	"github.com/vectoradb/vectoradb/internal/proxy"
 	"github.com/vectoradb/vectoradb/internal/version"
 )
@@ -32,7 +33,10 @@ var services = map[string][]string{
 const usage = `VectoraDB — serverless Postgres control CLI
 
 Usage:
-  vectoradb <command> [args]
+  vdb <command> [args]
+
+Setup:
+  setup                One-time: create/start the local VM (macOS) and bring the stack up
 
 Stack:
   start                Bring EVERYTHING up in the background: stack + proxy + APIs
@@ -77,7 +81,7 @@ Auth (admin):
   apikey list <email>            List a user's API keys
   apikey revoke <email> <id>     Revoke an API key
 
-  version              Print the vectoradb version
+  version              Print the vdb version
 `
 
 func main() {
@@ -86,9 +90,18 @@ func main() {
 		os.Exit(2)
 	}
 
+	// On macOS/Windows, forward engine commands into the managed Linux VM so the
+	// user only ever runs `vdb …`. On Linux (or inside the VM) this is a no-op.
+	if handled, err := host.Maybe(os.Args[1:]); handled {
+		must(err)
+		return
+	}
+
 	switch os.Args[1] {
 	case "version", "-v", "--version":
-		fmt.Printf("vectoradb %s\n", version.Version)
+		fmt.Printf("vdb %s\n", version.Version)
+	case "setup":
+		must(host.Setup())
 	case "start":
 		must(branch.Up())
 		for name, args := range services {
@@ -100,7 +113,7 @@ func main() {
 		fmt.Println("  proxy (SQL)  postgres://vectoradb:vectoradb@localhost:6432/<branch>")
 		fmt.Println("  storage      http://localhost:9001   (minioadmin/minioadmin)")
 		fmt.Println("\nWeb UI is a separate app — run it with:  make web-dev   (http://localhost:5173)")
-		fmt.Println("Stop everything with: vectoradb stop")
+		fmt.Println("Stop everything with: vdb stop")
 	case "stop":
 		for name := range services {
 			daemon.Stop(name)
@@ -136,7 +149,7 @@ func main() {
 		must(branch.PsqlShell("main"))
 	case "backup":
 		if len(os.Args) < 3 {
-			fmt.Println("usage: vectoradb backup <create|list>")
+			fmt.Println("usage: vdb backup <create|list>")
 			os.Exit(2)
 		}
 		switch os.Args[2] {
@@ -151,7 +164,7 @@ func main() {
 	case "restore":
 		ts := restoreArg(os.Args[2:])
 		if ts == "" {
-			fmt.Println("usage: vectoradb restore --to '<timestamp>'|latest")
+			fmt.Println("usage: vdb restore --to '<timestamp>'|latest")
 			os.Exit(2)
 		}
 		must(branch.Restore(ts))
@@ -161,7 +174,7 @@ func main() {
 		haCmd(os.Args[2:])
 	case "user":
 		if len(os.Args) < 4 || os.Args[2] != "create" {
-			fmt.Println("usage: vectoradb user create <email>")
+			fmt.Println("usage: vdb user create <email>")
 			os.Exit(2)
 		}
 		must(userCreate(os.Args[3]))
@@ -216,16 +229,16 @@ func durFlag(args []string, name string, def time.Duration) time.Duration {
 	return def
 }
 
-// branchCmd dispatches `vectoradb branch <subcommand>`.
+// branchCmd dispatches `vdb branch <subcommand>`.
 func branchCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: vectoradb branch <create|list|delete> [name]")
+		fmt.Println("usage: vdb branch <create|list|delete> [name]")
 		os.Exit(2)
 	}
 	switch args[0] {
 	case "create":
 		if len(args) < 2 {
-			fmt.Println("usage: vectoradb branch create <name>")
+			fmt.Println("usage: vdb branch create <name>")
 			os.Exit(2)
 		}
 		must(branch.Create(args[1], ""))
@@ -233,19 +246,19 @@ func branchCmd(args []string) {
 		must(branch.List())
 	case "delete":
 		if len(args) < 2 {
-			fmt.Println("usage: vectoradb branch delete <name>")
+			fmt.Println("usage: vdb branch delete <name>")
 			os.Exit(2)
 		}
 		must(branch.Delete(args[1]))
 	case "suspend":
 		if len(args) < 2 {
-			fmt.Println("usage: vectoradb branch suspend <name>")
+			fmt.Println("usage: vdb branch suspend <name>")
 			os.Exit(2)
 		}
 		must(branch.Suspend(args[1]))
 	case "resume":
 		if len(args) < 2 {
-			fmt.Println("usage: vectoradb branch resume <name>")
+			fmt.Println("usage: vdb branch resume <name>")
 			os.Exit(2)
 		}
 		must(branch.Wake(args[1]))
@@ -255,10 +268,10 @@ func branchCmd(args []string) {
 	}
 }
 
-// haCmd dispatches `vectoradb ha <subcommand>`.
+// haCmd dispatches `vdb ha <subcommand>`.
 func haCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: vectoradb ha <enable|status|failover|disable>")
+		fmt.Println("usage: vdb ha <enable|status|failover|disable>")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -306,13 +319,13 @@ func userCreate(email string) error {
 
 func apikeyCmd(args []string) {
 	if len(args) < 2 {
-		fmt.Println("usage: vectoradb apikey <create|list|revoke> <email> [name|id]")
+		fmt.Println("usage: vdb apikey <create|list|revoke> <email> [name|id]")
 		os.Exit(2)
 	}
 	s := openStore()
 	u, ok := s.UserByEmail(args[1])
 	if !ok {
-		must(fmt.Errorf("no such user: %s (create it with: vectoradb user create %s)", args[1], args[1]))
+		must(fmt.Errorf("no such user: %s (create it with: vdb user create %s)", args[1], args[1]))
 	}
 	switch args[0] {
 	case "create":
@@ -335,7 +348,7 @@ func apikeyCmd(args []string) {
 		}
 	case "revoke":
 		if len(args) < 3 {
-			fmt.Println("usage: vectoradb apikey revoke <email> <id>")
+			fmt.Println("usage: vdb apikey revoke <email> <id>")
 			os.Exit(2)
 		}
 		must(s.RevokeKey(u.ID, args[2]))

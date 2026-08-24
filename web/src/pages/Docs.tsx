@@ -36,47 +36,51 @@ export default function Docs() {
       <h1>Documentation</h1>
       <p className="lead">Set up, start, and use VectoraDB.</p>
 
-      <h2>1 · Setup</h2>
-      <p>VectoraDB runs inside a Linux VM with ZFS + Docker. On macOS, use{' '}
-        <a href="https://lima-vm.io" target="_blank" rel="noreferrer">Lima</a>:</p>
+      <h2>1 · Install</h2>
+      <p>One line installs the <code>vdb</code> command. It handles the rest — the Linux VM
+        (on macOS), Docker, ZFS, the storage pool, and the image are all set up for you.</p>
+      <p><strong>macOS</strong> — needs{' '}
+        <a href="https://lima-vm.io" target="_blank" rel="noreferrer">Lima</a> for the local VM:</p>
       <Code>{`brew install lima
-limactl start --tty=false
-lima sudo apt-get update
-lima sudo apt-get install -y zfsutils-linux docker.io golang-go
-lima sudo truncate -s 30G /var/lib/vectoradb-zpool.img
-lima sudo zpool create -f vectoradb /var/lib/vectoradb-zpool.img
-lima sudo zfs create vectoradb/branches`}</Code>
-      <p>Build the image and CLI inside the VM (repo is auto-mounted):</p>
-      <Code>{`lima bash -c 'cd <repo> && sudo docker build -t vectoradb/postgres-walg:16 docker/postgres \\
-  && go build -o /tmp/vectoradb ./cmd/vectoradb'`}</Code>
+curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+vdb setup`}</Code>
+      <p><strong>Linux</strong>:</p>
+      <Code>{`curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+sudo vdb start`}</Code>
+      <p><code>setup</code> (macOS) / <code>start</code> (Linux) creates the VM, installs Docker
+        and ZFS, builds the copy-on-write pool and image, and brings the database, proxy, and
+        APIs up — no manual steps.</p>
 
-      <h2>2 · Start</h2>
-      <p>Bring the DB + APIs up in the background, then run this web app against them:</p>
-      <Code>{`lima /tmp/vectoradb start   # control API :8080 · agent API :8088 · proxy :6432
-make web-dev                # this UI at http://localhost:5173`}</Code>
+      <h2>2 · Everyday commands</h2>
+      <p>Once installed, <code>vdb</code> is the single command everywhere (on macOS it quietly
+        runs inside the VM for you):</p>
+      <Code>{`vdb status            # what's running
+vdb stop              # stop everything
+vdb start             # bring it back up
+make web-dev          # run this web UI at http://localhost:5173`}</Code>
 
       <h2>3 · Branches</h2>
-      <Code>{`lima /tmp/vectoradb branch create qa
-lima /tmp/vectoradb branch list
-lima /tmp/vectoradb branch delete qa`}</Code>
+      <Code>{`vdb branch create qa
+vdb branch list
+vdb branch delete qa`}</Code>
       <p>…or create / suspend / resume / delete them on the <a href="/dashboard">Dashboard</a>.</p>
 
       <h2>4 · Connect &amp; CRUD</h2>
       <p>Use the <a href="/console">SQL console</a>, or any Postgres client through the proxy
         (database = branch name):</p>
-      <Code>{`lima psql "postgres://vectoradb:vectoradb@127.0.0.1:6432/qa"
+      <Code>{`psql "postgres://vectoradb:vectoradb@127.0.0.1:6432/qa"
 
 CREATE TABLE notes(id serial PRIMARY KEY, body text);
 INSERT INTO notes(body) VALUES ('first'),('second');
 SELECT * FROM notes;`}</Code>
 
       <h2>5 · Time-travel · serverless · agents · HA</h2>
-      <Code>{`lima /tmp/vectoradb backup create
-lima /tmp/vectoradb restore --to latest
-lima /tmp/vectoradb branch suspend qa          # wakes on next connect
+      <Code>{`vdb backup create
+vdb restore --to latest
+vdb branch suspend qa                    # wakes on next connect
 curl -X POST localhost:8088/agents/alice/branch # a database per agent
-lima /tmp/vectoradb ha enable
-lima /tmp/vectoradb ha failover`}</Code>
+vdb ha enable
+vdb ha failover`}</Code>
 
       <h2>API playground</h2>
       <p className="muted">These call the live control-plane API:</p>

@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import { useAuth } from '../auth-context'
 
 const features: [string, string, string][] = [
   ['🌿', 'Instant branches', 'Copy-on-write clones of your entire database in seconds — near-zero extra space.'],
@@ -10,6 +11,7 @@ const features: [string, string, string][] = [
 ]
 
 export default function Landing() {
+  const { user } = useAuth()
   return (
     <>
       <section className="hero fade-up">
@@ -22,20 +24,22 @@ export default function Landing() {
           </p>
           <div className="cta">
             <Link className="btn" to="/docs">Get started</Link>
-            <Link className="btn ghost" to="/dashboard">Open dashboard</Link>
+            {user
+              ? <Link className="btn ghost" to="/dashboard">Open dashboard</Link>
+              : <Link className="btn ghost" to="/login">Log in</Link>}
             <a className="btn ghost" href="https://github.com/SauravYadav12/vectoraDB" target="_blank" rel="noreferrer">GitHub ↗</a>
           </div>
         </div>
 
         <div className="hero-visual">
           <div className="terminal">
-            <div className="bar"><i className="r" /><i className="y" /><i className="g" /><span className="t">vectoradb — zsh</span></div>
+            <div className="bar"><i className="r" /><i className="y" /><i className="g" /><span className="t">vdb — zsh</span></div>
             <div className="body">
-              <div><span className="prompt">$</span> <span className="cmd">vectoradb branch create feature</span></div>
+              <div><span className="prompt">$</span> <span className="cmd">vdb branch create feature</span></div>
               <div className="ok">  ✓ branch “feature” ready in 1.9s · copy-on-write</div>
               <div><span className="prompt">$</span> <span className="cmd">psql …/feature -c "UPDATE …"</span></div>
               <div className="dim">  UPDATE 4200</div>
-              <div><span className="prompt">$</span> <span className="cmd">vectoradb ha failover</span></div>
+              <div><span className="prompt">$</span> <span className="cmd">vdb ha failover</span></div>
               <div className="ok">  ✓ standby promoted · same endpoint</div>
               <div><span className="prompt">$</span> <span className="cursor" /></div>
             </div>
@@ -82,7 +86,9 @@ export default function Landing() {
         <p className="muted">Run the API, open the dashboard, and start branching.</p>
         <div className="cta" style={{ justifyContent: 'center', marginTop: 16 }}>
           <Link className="btn" to="/docs">Read the docs</Link>
-          <Link className="btn ghost" to="/console">Try the SQL console</Link>
+          {user
+            ? <Link className="btn ghost" to="/console">Open the SQL console</Link>
+            : <Link className="btn ghost" to="/login">Log in</Link>}
         </div>
       </div>
     </>

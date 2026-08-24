@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package branch
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+)
+
+// The branching engine needs three things on the Linux host before anything can
+// start: a reachable Docker daemon, a ZFS pool (with the base dataset), and the
+// Postgres+wal-g image. Historically an operator created all of these by hand
+// (truncate a file, zpool create, zfs create, docker build) — that is the bulk
+// of the old setup instructions. Provision does it automatically and
+// idempotently, so day-to-day use collapses to a single `vdb up`/`vdb start`.
+
+const (
+	// pool is derived from datasetBase ("vectoradb/branches" -> "vectoradb").
+	pool = "vectoradb"
+
+	// Defaults for auto-creating the pool on a loopback file when no ZFS pool
+	// exists yet. Overridable via env for operators with a spare block device.
+	defaultZpoolFile = "/var/lib/vectoradb-zpool.img"
+	defaultZpoolSize = "30G"
+
+	envZpoolDevice  = "VECTORADB_ZPOOL_DEVICE"  // block device or file for the pool vdev
+	envZpoolSize    = "VECTORADB_ZPOOL_SIZE"    // size when creating a file vdev
+	envImageContext = "VECTORADB_IMAGE_CONTEXT" // docker build context for the image
+)
+
+func envOr(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
+}
+
+// Provision makes the host ready to run the stack. Safe to call on an
+// already-provisioned host: each step is a no-op when its resource exists.
+func Provision() error {
+	if err := ensureDocker(); err != nil {
+		return err
+	}
+	if err := ensurePool(); err != nil {
+		return err
+	}
+	return ensureImage()
+}
+
+// ensureDocker verifies Docker is installed and its daemon is reachable.
+func ensureDocker() error {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return fmt.Errorf("Docker is not installed or not on PATH — install Docker and retry")
+	}
+	if exec.Command("sudo", "docker", "info").Run() != nil {
+		return fmt.Errorf("cannot reach the Docker daemon — is Docker running?")
+	}
+	return nil
+}
+
+func poolExists() bool {
+	return exec.Command("sudo", "zpool", "list", "-H", "-o", "name", pool).Run() == nil
+}
+
+// ensurePool guarantees the ZFS pool and the base branches dataset exist,
+// creating the pool on a loopback file (or a given block device) if absent.
+func ensurePool() error {
+	if _, err := exec.LookPath("zfs"); err != nil {
+		return fmt.Errorf("ZFS is not installed — install zfsutils and retry")
+	}
+	if poolExists() {
+		if !datasetExists(datasetBase) {
+			return run("zfs", "create", "-p", datasetBase)
+		}
+		return nil
+	}
+
+	vdev := envOr(envZpoolDevice, defaultZpoolFile)
+	// A file vdev is created on demand; a real block device is used as-is.
+	if !strings.HasPrefix(vdev, "/dev/") {
+		if _, err := os.Stat(vdev); os.IsNotExist(err) {
+			fmt.Printf("Creating a %s ZFS pool image at %s (first run only)…\n",
+				envOr(envZpoolSize, defaultZpoolSize), vdev)
+			if err := run("truncate", "-s", envOr(envZpoolSize, defaultZpoolSize), vdev); err != nil {
+				return fmt.Errorf("creating pool image: %w", err)
+			}
+		}
+	}
+	fmt.Printf("Creating ZFS pool %q on %s…\n", pool, vdev)
+	if err := run("zpool", "create", "-f", pool, vdev); err != nil {
+		return fmt.Errorf("creating ZFS pool: %w", err)
+	}
+	return run("zfs", "create", "-p", datasetBase)
+}
+
+func imageExists() bool {
+	return exec.Command("sudo", "docker", "image", "inspect", image).Run() == nil
+}
+
+// ensureImage guarantees the Postgres+wal-g image is present, building it from a
+// discovered (or configured) context when it is not already available locally.
+func ensureImage() error {
+	if imageExists() {
+		return nil
+	}
+	ctx := envOr(envImageContext, findImageContext())
+	if ctx == "" {
+		return fmt.Errorf("image %s is missing and no build context was found — "+
+			"set %s to the docker/postgres directory, or pre-build the image", image, envImageContext)
+	}
+	fmt.Printf("Building image %s from %s (first run only, this can take a minute)…\n", image, ctx)
+	return run("docker", "build", "-t", image, ctx)
+}
+
+// findImageContext looks for the docker/postgres build context near the current
+// working directory (the repo is present in dev/self-host-from-source setups).
+func findImageContext() string {
+	candidates := []string{
+		"docker/postgres",
+		"../docker/postgres",
+		"../../docker/postgres",
+	}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(wd, "docker", "postgres"))
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(filepath.Join(c, "Dockerfile")); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return ""
+}

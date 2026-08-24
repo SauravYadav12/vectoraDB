@@ -6,7 +6,7 @@
 # Exits non-zero if any assertion fails.
 set -uo pipefail
 
-S="${VECTORADB_BIN:-/tmp/vectoradb}"
+S="${VECTORADB_BIN:-/tmp/vdb}"
 PROXY="postgresql://vectoradb:vectoradb@127.0.0.1:6432"
 PASS=0
 FAIL=0

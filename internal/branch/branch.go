@@ -239,6 +239,9 @@ func minioRunning() bool {
 // Up brings up the full stack: docker network, MinIO (object storage) with its
 // WAL bucket, and the primary "main" branch (which archives WAL to MinIO).
 func Up() error {
+	if err := Provision(); err != nil {
+		return err
+	}
 	if err := ensureNetwork(); err != nil {
 		return err
 	}

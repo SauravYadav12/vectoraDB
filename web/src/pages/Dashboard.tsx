@@ -51,7 +51,7 @@ export default function Dashboard() {
         <h1>Dashboard</h1>
         <div className="offline">
           Can’t reach the API at <code>{API}</code>. Start it with{' '}
-          <code>lima /tmp/vectoradb start</code>, or set <code>VITE_API_URL</code>.
+          <code>vdb start</code>, or set <code>VITE_API_URL</code>.
         </div>
       </>
     )

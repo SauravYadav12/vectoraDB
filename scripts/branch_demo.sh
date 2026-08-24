@@ -5,7 +5,7 @@
 # Run inside the Linux dev VM (ZFS + Docker), after `vectoradb branch init`.
 set -euo pipefail
 
-S="${VECTORADB_BIN:-/tmp/vectoradb}"
+S="${VECTORADB_BIN:-/tmp/vdb}"
 
 pmain() { sudo docker exec -e PGPASSWORD=vectoradb vec-main \
   psql -U vectoradb -d vectoradb "$@"; }
