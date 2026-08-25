@@ -26,7 +26,7 @@ import (
 // background services managed by `start`/`stop` (name -> subcommand + flags).
 var services = map[string][]string{
 	"controlplane": {"controlplane", "--addr", ":8080"},
-	"proxy":        {"proxy", "--addr", ":6432", "--idle", "2m"},
+	"gateway":      {"gateway", "--addr", ":6432", "--idle", "2m"},
 	"api":          {"serve", "--addr", ":8088"},
 }
 
@@ -39,12 +39,12 @@ Setup:
   setup                One-time: create/start the local VM (macOS) and bring the stack up
 
 Stack:
-  start                Bring EVERYTHING up in the background: stack + proxy + APIs
+  start                Bring EVERYTHING up in the background: stack + gateway + APIs
   stop                 Stop background servers and all containers
   up                   Bring up the stack: network + MinIO + primary 'main' (archiving)
   down                 Stop MinIO and all Postgres containers (ZFS data preserved)
   status               Show servers, main readiness, stored backups, and branches
-  logs [proxy|api]     Print a background server's log
+  logs [gateway|api]   Print a background server's log
   psql                 Open a psql shell on the primary 'main'
 
 Durability / time-travel:
@@ -66,9 +66,9 @@ High availability:
   ha disable           Remove the standby
 
 Serverless front door:
-  proxy [--addr :6432] [--idle 2m]
-                       Wire-protocol proxy: route by dbname=<branch>, auto-resume
-                       suspended branches, auto-suspend idle ones (--idle 0 = off)
+  gateway [--addr :6432] [--idle 2m]
+                       Smart SQL gateway: reads dbname=<branch> and routes to it,
+                       auto-resuming suspended branches, auto-suspending idle ones (--idle 0 = off)
   controlplane [--addr :8080]
                        Control-plane REST API (JSON; the web UI is a separate app in web/)
 
@@ -110,7 +110,7 @@ func main() {
 		fmt.Println("\nVectoraDB is up (background):")
 		fmt.Println("  control API  http://localhost:8080/api/status")
 		fmt.Println("  agent API    http://localhost:8088   (POST /agents/{id}/branch)")
-		fmt.Println("  proxy (SQL)  postgres://vectoradb:vectoradb@localhost:6432/<branch>")
+		fmt.Println("  gateway(SQL) postgres://vectoradb:vectoradb@localhost:6432/<branch>")
 		fmt.Println("  storage      http://localhost:9001   (minioadmin/minioadmin)")
 		fmt.Println("\nWeb UI is a separate app — run it with:  make web-dev   (http://localhost:5173)")
 		fmt.Println("Stop everything with: vdb stop")
@@ -119,9 +119,9 @@ func main() {
 			daemon.Stop(name)
 		}
 		must(branch.Down())
-		fmt.Println("stopped: control API, agent API, proxy, and all containers")
+		fmt.Println("stopped: control API, agent API, gateway, and all containers")
 	case "logs":
-		svc := "proxy"
+		svc := "gateway"
 		if len(os.Args) > 2 {
 			svc = os.Args[2]
 		}
@@ -141,7 +141,7 @@ func main() {
 	case "status":
 		fmt.Println("=== servers ===")
 		fmt.Printf("control API: %s\n", daemon.Status("controlplane"))
-		fmt.Printf("proxy: %s\n", daemon.Status("proxy"))
+		fmt.Printf("gateway: %s\n", daemon.Status("gateway"))
 		fmt.Printf("agent API: %s\n", daemon.Status("api"))
 		fmt.Println()
 		must(branch.Status())
@@ -184,7 +184,8 @@ func main() {
 		must(agentapi.Serve(addrFlag(os.Args[2:], ":8088")))
 	case "controlplane":
 		must(controlplane.Serve(addrFlag(os.Args[2:], ":8080")))
-	case "proxy":
+	case "gateway":
+		// The internal package is still named "proxy"; the user-facing command is "gateway".
 		must(proxy.Serve(addrFlag(os.Args[2:], ":6432"), durFlag(os.Args[2:], "--idle", 2*time.Minute)))
 	default:
 		fmt.Printf("unknown command: %s\n\n", os.Args[1])

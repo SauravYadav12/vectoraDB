@@ -7,7 +7,7 @@
 set -uo pipefail
 
 S="${VECTORADB_BIN:-/tmp/vdb}"
-PROXY="postgresql://vectoradb:vectoradb@127.0.0.1:6432"
+GATEWAY="postgresql://vectoradb:vectoradb@127.0.0.1:6432"
 PASS=0
 FAIL=0
 
@@ -59,14 +59,14 @@ echo "### 6. HA: replication + failover"
 $S ha enable >/dev/null 2>&1; sleep 2
 assert_eq "standby is streaming" "$(pg vec-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" "1"
 $S ha failover >/dev/null 2>&1; sleep 3
-W="$(psql "$PROXY/main" -tAqc "INSERT INTO pit VALUES (99) RETURNING 'okwrite'" 2>&1 | head -1)"
-assert_eq "write succeeds via proxy after failover" "$W" "okwrite"
+W="$(psql "$GATEWAY/main" -tAqc "INSERT INTO pit VALUES (99) RETURNING 'okwrite'" 2>&1 | head -1)"
+assert_eq "write succeeds via gateway after failover" "$W" "okwrite"
 $S ha disable >/dev/null 2>&1; $S up >/dev/null 2>&1; sleep 3
 
 echo "### 7. regression: reaper never suspends the standby"
 $S ha enable >/dev/null 2>&1; sleep 2
 $S branch create rgn >/dev/null 2>&1
-nohup "$S" proxy --addr :6501 --idle 8s >/tmp/rgnproxy.log 2>&1 &
+nohup "$S" gateway --addr :6501 --idle 8s >/tmp/rgngateway.log 2>&1 &
 RP=$!
 sleep 28
 assert_eq "standby survives the reaper" "$(sudo docker inspect -f '{{.State.Status}}' vec-standby 2>/dev/null)" "running"

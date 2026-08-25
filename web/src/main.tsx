@@ -7,6 +7,8 @@ import { logout as apiLogout } from './api'
 import { AuthProvider, useAuth } from './auth-context'
 import Landing from './pages/Landing'
 import Docs from './pages/Docs'
+import Guide from './pages/Guide'
+import { ConfirmProvider } from './confirm'
 import Dashboard from './pages/Dashboard'
 import Console from './pages/Console'
 import Login from './pages/Login'
@@ -66,6 +68,7 @@ function Layout() {
         <Link to="/" className="brand"><Mark /> Vectora<span>DB</span></Link>
         <div className="links">
           <NavLink to="/" end>Home</NavLink>
+          <NavLink to="/guide">Guide</NavLink>
           <NavLink to="/docs">Docs</NavLink>
           {user && <>
             <NavLink to="/dashboard">Dashboard</NavLink>
@@ -98,6 +101,7 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <Landing /> },
       { path: 'docs', element: <Docs /> },
+      { path: 'guide', element: <Guide /> },
       { path: 'login', element: <Login /> },
       { path: 'dashboard', element: <RequireAuth><Dashboard /></RequireAuth> },
       { path: 'console', element: <RequireAuth><Console /></RequireAuth> },
@@ -109,7 +113,9 @@ const router = createBrowserRouter([
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <AuthProvider>
-      <RouterProvider router={router} />
+      <ConfirmProvider>
+        <RouterProvider router={router} />
+      </ConfirmProvider>
     </AuthProvider>
   </React.StrictMode>,
 )

@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { listKeys, createKey, revokeKey, type ApiKey } from '../api'
+import { useConfirm } from '../confirm'
 
 export default function ApiKeys() {
+  const confirm = useConfirm()
   const [keys, setKeys] = useState<ApiKey[]>([])
   const [name, setName] = useState('')
   const [fresh, setFresh] = useState<string | null>(null)
@@ -19,9 +21,16 @@ export default function ApiKeys() {
       await refresh()
     } catch (e) { setErr((e as Error).message) }
   }
-  const revoke = async (id: string) => {
-    if (!confirm('Revoke this API key? Anything using it stops working.')) return
-    try { await revokeKey(id); await refresh() } catch (e) { setErr((e as Error).message) }
+  const revoke = async (k: ApiKey) => {
+    const ok = await confirm({
+      title: 'Revoke API key',
+      message: <>Revoke <b>{k.name}</b> (<code>{k.prefix}…</code>)? Anything using it stops working immediately. This can't be undone.</>,
+      confirmText: 'Revoke',
+      danger: true,
+    })
+    if (!ok) return
+    setErr('')
+    try { await revokeKey(k.id); await refresh() } catch (e) { setErr((e as Error).message) }
   }
 
   return (
@@ -29,7 +38,7 @@ export default function ApiKeys() {
       <h1>API keys</h1>
       <p className="muted" style={{ marginTop: -2 }}>
         Use a key as a <code>Bearer</code> token for the API/agent endpoints, or as the
-        password when connecting through the proxy.
+        password when connecting through the gateway.
       </p>
 
       <div className="row">
@@ -59,7 +68,7 @@ export default function ApiKeys() {
                   <td><b>{k.name}</b></td>
                   <td className="mono muted">{k.prefix}…</td>
                   <td className="muted">{new Date(k.created * 1000).toLocaleString()}</td>
-                  <td><div className="actions"><button className="ghost danger" onClick={() => revoke(k.id)}>Revoke</button></div></td>
+                  <td><div className="actions"><button className="ghost danger" onClick={() => revoke(k)}>Revoke</button></div></td>
                 </tr>
               ))}
           </tbody>

@@ -3,6 +3,7 @@ import {
   getStatus, getBranches, createBranch, deleteBranch, suspendBranch, resumeBranch,
   API, type Status, type Branch,
 } from '../api'
+import { useConfirm } from '../confirm'
 
 function Dot({ up }: { up: boolean }) {
   return <span className={'dot ' + (up ? 'up' : 'down')} />
@@ -16,6 +17,7 @@ function toBytes(s: string): number {
 }
 
 export default function Dashboard() {
+  const confirm = useConfirm()
   const [status, setStatus] = useState<Status | null>(null)
   const [branches, setBranches] = useState<Branch[]>([])
   const [name, setName] = useState('')
@@ -61,7 +63,7 @@ export default function Dashboard() {
     ['Primary', <><Dot up={status.mainReady} /> {status.mainReady ? 'Ready' : 'Down'}</>],
     ['Branches', status.branches],
     ['Agent DBs', status.agents],
-    ['Proxy', <><Dot up={status.servers.proxy} /> {status.servers.proxy ? 'Up' : 'Down'}</>],
+    ['Gateway', <><Dot up={status.servers.gateway} /> {status.servers.gateway ? 'Up' : 'Down'}</>],
     ['Replica', status.ha.enabled
       ? <><Dot up={status.ha.streaming} /> {status.ha.streaming ? 'streaming' : status.ha.standby}</>
       : <span style={{ color: 'var(--muted)', fontSize: 18 }}>none</span>],
@@ -89,7 +91,7 @@ export default function Dashboard() {
           onKeyDown={e => { if (e.key === 'Enter') create() }}
           style={{ minWidth: 240 }}
         />
-        <button className="primary" onClick={create}>+ Create branch</button>
+        <button className="primary" onClick={create} disabled={!name.trim()}>+ Create branch</button>
       </div>
       {err && <div className="err">{err}</div>}
 
@@ -126,7 +128,14 @@ export default function Dashboard() {
                           ? <button className="ghost" onClick={() => act(() => suspendBranch(b.name))}>Suspend</button>
                           : <button className="ghost" onClick={() => act(() => resumeBranch(b.name))}>Resume</button>)}
                         {!b.primary && (
-                          <button className="ghost danger" onClick={() => { if (confirm(`Delete branch "${b.name}"? This destroys its data.`)) act(() => deleteBranch(b.name)) }}>Delete</button>
+                          <button className="ghost danger" onClick={async () => {
+                            const ok = await confirm({
+                              title: 'Delete branch',
+                              message: <>Delete branch <b>{b.name}</b>? This permanently destroys its data and can't be undone.</>,
+                              confirmText: 'Delete', danger: true,
+                            })
+                            if (ok) act(() => deleteBranch(b.name))
+                          }}>Delete</button>
                         )}
                       </div>
                     </td>

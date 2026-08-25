@@ -278,8 +278,21 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); 
   background: var(--term-bg); border-color: var(--border-strong); color: #d8def7; }
 .grid-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 14px; margin-top: 14px; max-height: 58vh; }
 .grid-wrap table td { font-family: var(--font-mono); font-size: 12.4px; white-space: pre; }
-.err { color: #ffdada; background: color-mix(in srgb, var(--red) 16%, var(--panel)); border: 1px solid var(--red);
+.err { color: color-mix(in srgb, var(--red) 78%, var(--text)); background: color-mix(in srgb, var(--red) 14%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border));
   border-radius: 12px; padding: 11px 15px; margin-top: 14px; font-size: 13.5px; font-family: var(--font-mono); }
+
+/* In-app confirmation modal (replaces window.confirm) */
+.modal-overlay { position: fixed; inset: 0; z-index: 200; display: flex; align-items: center; justify-content: center;
+  padding: 20px; background: color-mix(in srgb, #000 55%, transparent); backdrop-filter: blur(2px); }
+.modal { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); width: 100%; max-width: 440px; padding: 22px 22px 18px; }
+.modal h3 { margin: 0 0 8px; font-size: 18px; }
+.modal-body { color: var(--muted); font-size: 14px; line-height: 1.55; }
+.modal-body b, .modal-body code { color: var(--text); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+button.primary.danger { background: var(--red); color: #fff; filter: none; }
+button.primary.danger:hover { filter: brightness(1.06); }
 .okmsg { color: var(--green); font-size: 13px; margin-top: 12px; font-family: var(--font-mono); }
 .offline { background: color-mix(in srgb, var(--amber) 14%, var(--panel)); border: 1px solid var(--amber);
   color: var(--text); border-radius: 14px; padding: 14px 18px; margin: 16px 0; font-size: 14px; }
@@ -296,6 +309,13 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); 
 .authcard .oauth .btn { width: 100%; text-align: center; }
 .divider { display: flex; align-items: center; gap: 12px; color: var(--faint); font-size: 12px; margin: 6px 0; }
 .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.authtabs { display: flex; gap: 4px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 12px; padding: 4px; margin: 6px 0 4px; }
+.authtabs button { flex: 1; padding: 9px 0; border: none; background: transparent; color: var(--muted);
+  border-radius: 9px; font: inherit; font-weight: 600; cursor: pointer; transition: background .15s, color .15s; }
+.authtabs button.active { background: var(--accent); color: #fff; }
+.authcard .hint { font-size: 12.5px; color: var(--muted); margin-top: 12px; }
+.authcard .hint code { font-size: 11.5px; }
 
 .fade-up { animation: fadeUp 0.5s ease backwards; }
 @keyframes fadeUp { from { opacity: 0; transform: translateY(12px); } }

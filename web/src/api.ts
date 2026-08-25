@@ -11,7 +11,7 @@ export type Status = {
   agents: number
   ha: HAState
   storage: StorageInfo
-  servers: { proxy: boolean; api: boolean }
+  servers: { gateway: boolean; api: boolean }
 }
 export type Branch = {
   name: string; primary: boolean; agent: boolean; state: string
@@ -58,7 +58,7 @@ export const oauthUrl = (provider: 'github' | 'google') => `${API}/auth/oauth/${
 // --- api keys ---
 export const listKeys = () => req('GET', `${API}/api/keys`) as Promise<{ keys: ApiKey[] }>
 export const createKey = (name: string) => req('POST', `${API}/api/keys`, { name }) as Promise<{ key: string; info: ApiKey }>
-export const revokeKey = (id: string) => req('DELETE', `${API}/api/keys/${id}`)
+export const revokeKey = (id: string) => req('DELETE', `${API}/api/keys/${encodeURIComponent(id)}`)
 
 // --- control plane ---
 export const getStatus = () => req('GET', `${API}/api/status`) as Promise<Status>

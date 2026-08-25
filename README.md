@@ -17,12 +17,12 @@ Go.
   storage + point-in-time restore.
 - **Phase 2 — instant branching:** ✅ ZFS copy-on-write branches in seconds,
   fully isolated; plus the **Agent Branch API** (one database per AI agent).
-- **Phase 3 — serverless front door:** ✅ wire-protocol proxy (one endpoint,
+- **Phase 3 — serverless front door:** ✅ wire-protocol gateway (one endpoint,
   route by database name), **auto-suspend/resume** (idle branches stop; the
-  proxy wakes them on connect), **background/daemon mode** (`start`/`stop`), and
+  gateway wakes them on connect), **background/daemon mode** (`start`/`stop`), and
   a **control-plane REST API**.
 - **Phase 4 — High availability:** ✅ a hot standby streams from the primary;
-  `ha failover` promotes it and the proxy reroutes `main` transparently.
+  `ha failover` promotes it and the gateway reroutes `main` transparently.
 - **Phase 5 — tests:** ✅ Go unit tests + a VM integration test.
 - **Phase 6 — docs & packaging:** ✅ demo script, storage metric, architecture PDF.
 - **Phase 7 — web app:** ✅ a standalone **React + TypeScript** UI in `web/`
@@ -67,7 +67,7 @@ sudo vdb start
 ```
 
 `vdb setup` (macOS) / `vdb start` (Linux) creates the VM, installs Docker + ZFS,
-builds the pool and image, and brings the database, proxy, and APIs up — no
+builds the pool and image, and brings the database, gateway, and APIs up — no
 manual steps. On macOS, `vdb` transparently runs the engine inside the VM, so
 every command below is just `vdb …` with no `lima` prefix.
 
@@ -77,13 +77,13 @@ every command below is just `vdb …` with no `lima` prefix.
 
 ## Usage
 
-**One command brings everything up in the background** (stack + proxy + agent
+**One command brings everything up in the background** (stack + gateway + agent
 API), detached, no terminal held open:
 
 ```bash
 vdb start    # everything up (background)
 vdb status   # servers + main + branches
-vdb logs proxy
+vdb logs gateway
 vdb stop      # stop servers + containers
 ```
 
@@ -93,7 +93,7 @@ Then run the **web UI** — a separate React app in `web/` — against the API:
 make web-dev   # http://localhost:5173  (Landing · Docs · Dashboard · SQL Console)
 ```
 
-Other endpoints: control API `http://localhost:8080/api`, proxy
+Other endpoints: control API `http://localhost:8080/api`, gateway
 `postgres://vectoradb:vectoradb@localhost:6432/<branch>`, agent API
 `http://localhost:8088`, object storage `http://localhost:9001`.
 
@@ -127,14 +127,14 @@ vdb branch create qa   # instant copy-on-write branch
 vdb branch list
 vdb branch delete qa
 
-vdb proxy --addr :6432 # one endpoint; route with dbname=<branch>
+vdb gateway --addr :6432 # one endpoint; route with dbname=<branch>
 
 vdb down               # stop containers (ZFS datasets preserved)
 ```
 
 ### Single endpoint (serverless front door)
 
-`vdb proxy` exposes one PostgreSQL endpoint (`:6432`) and routes each
+`vdb gateway` exposes one PostgreSQL endpoint (`:6432`) and routes each
 connection to the branch named by the `database` parameter — so clients use one
 stable address instead of per-branch ports:
 
@@ -143,18 +143,18 @@ psql "postgresql://vectoradb:vectoradb@127.0.0.1:6432/main"        # -> main
 psql "postgresql://vectoradb:vectoradb@127.0.0.1:6432/agent-bob"   # -> bob's branch
 ```
 
-**Auto-suspend / auto-resume (serverless behaviour).** The proxy suspends any
+**Auto-suspend / auto-resume (serverless behaviour).** The gateway suspends any
 branch idle longer than `--idle` (default `2m`, `--idle 0` to disable) and
 transparently resumes it on the next connection:
 
 ```bash
-vdb proxy --addr :6432 --idle 90s   # idle branches stop; wake on connect
+vdb gateway --addr :6432 --idle 90s   # idle branches stop; wake on connect
 vdb branch suspend qa               # manual stop (data preserved)
 vdb branch resume qa                # manual start
 ```
 
 Suspended branches keep their data (only the container stops); resume takes a
-couple of seconds. Connect through the proxy for a stable address — a resumed
+couple of seconds. Connect through the gateway for a stable address — a resumed
 branch's direct per-branch port may change.
 
 MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`).
@@ -186,7 +186,7 @@ isolation from `main` and other agents, and the branch is discarded on delete.
 
 `ha enable` provisions a hot **standby** that streams WAL from the primary
 (asynchronous — no commit-latency cost). `ha failover` promotes it and reroutes
-`main` through the proxy, so clients keep the **same connection string** across a
+`main` through the gateway, so clients keep the **same connection string** across a
 primary failure.
 
 ```bash

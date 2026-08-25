@@ -30,10 +30,23 @@ export default function Login() {
     }
   }
 
+  const signupOpen = prov?.signup !== false
+
   return (
     <div className="authcard fade-up">
-      <h1>{mode === 'login' ? 'Log in' : 'Create account'}</h1>
-      <p className="muted">Access your VectoraDB dashboard, SQL console, and API keys.</p>
+      {signupOpen ? (
+        <div className="authtabs" role="tablist">
+          <button className={mode === 'login' ? 'active' : ''} onClick={() => { setMode('login'); setErr('') }}>Log in</button>
+          <button className={mode === 'register' ? 'active' : ''} onClick={() => { setMode('register'); setErr('') }}>Sign up</button>
+        </div>
+      ) : (
+        <h1>Log in</h1>
+      )}
+      <p className="muted">
+        {mode === 'register'
+          ? 'Create a VectoraDB account to get a dashboard, SQL console, and API keys.'
+          : 'Access your VectoraDB dashboard, SQL console, and API keys.'}
+      </p>
 
       {prov && (prov.github || prov.google) && (
         <div className="oauth">
@@ -47,14 +60,13 @@ export default function Login() {
         <input type="email" placeholder="you@example.com" value={email} onChange={e => setEmail(e.target.value)} required />
         <input type="password" placeholder="password" value={password} onChange={e => setPassword(e.target.value)} required />
         {err && <div className="err">{err}</div>}
-        <button className="primary" disabled={busy}>{busy ? '…' : mode === 'login' ? 'Log in' : 'Sign up'}</button>
+        <button className="primary" disabled={busy}>{busy ? '…' : mode === 'login' ? 'Log in' : 'Create account'}</button>
       </form>
 
-      {prov?.signup !== false && (
-        <p className="muted" style={{ marginTop: 14 }}>
-          {mode === 'login'
-            ? <>No account? <a style={{ cursor: 'pointer' }} onClick={() => setMode('register')}>Create one</a></>
-            : <>Have an account? <a style={{ cursor: 'pointer' }} onClick={() => setMode('login')}>Log in</a></>}
+      {!signupOpen && (
+        <p className="hint">
+          Signups are closed on this instance. An admin can create your account with{' '}
+          <code>vdb user create you@example.com</code>.
         </p>
       )}
     </div>

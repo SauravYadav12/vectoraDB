@@ -6,12 +6,12 @@
 set -uo pipefail
 
 S="${VECTORADB_BIN:-/tmp/vdb}"
-PROXY="postgres://vectoradb:vectoradb@127.0.0.1:6432"
+GATEWAY="postgres://vectoradb:vectoradb@127.0.0.1:6432"
 say() { echo; echo "──▶ $*"; echo; }
-sql() { psql "$PROXY/$1" -c "$2"; }
+sql() { psql "$GATEWAY/$1" -c "$2"; }
 pg()  { sudo docker exec -e PGPASSWORD=vectoradb "$1" psql -U vectoradb -d vectoradb "${@:2}"; }
 
-say "Bringing VectoraDB up (stack + proxy + control API + agent API)"
+say "Bringing VectoraDB up (stack + gateway + control API + agent API)"
 $S start >/dev/null 2>&1; sleep 4
 $S status 2>&1 | sed -n '1,12p'
 
@@ -19,7 +19,7 @@ say "Create an instant copy-on-write branch 'demo' (note the time)"
 $S branch delete demo >/dev/null 2>&1
 time $S branch create demo
 
-say "CRUD on the branch, through the single proxy endpoint (dbname=demo)"
+say "CRUD on the branch, through the single gateway endpoint (dbname=demo)"
 sql demo "CREATE TABLE notes(id serial PRIMARY KEY, body text);"
 sql demo "INSERT INTO notes(body) VALUES ('hello'),('world') RETURNING *;"
 sql demo "UPDATE notes SET body='edited' WHERE id=1;"

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package daemon runs VectoraDB's long-lived servers (proxy, agent API) as
+// Package daemon runs VectoraDB's long-lived servers (gateway, agent API) as
 // detached background processes so they don't hold a terminal. Each service is
 // the vectoradb binary re-invoked with its subcommand, started in a new session
 // (setsid) with a pidfile and a log file under ~/.vectoradb.
@@ -47,7 +47,7 @@ func Alive(name string) bool {
 }
 
 // Start launches a service detached (no-op if already running). args are the
-// vectoradb subcommand and flags, e.g. {"proxy","--addr",":6432"}.
+// vectoradb subcommand and flags, e.g. {"gateway","--addr",":6432"}.
 func Start(name string, args []string) error {
 	if Alive(name) {
 		return nil

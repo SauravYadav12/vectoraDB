@@ -5,9 +5,9 @@ const features: [string, string, string][] = [
   ['🌿', 'Instant branches', 'Copy-on-write clones of your entire database in seconds — near-zero extra space.'],
   ['⏱️', 'Time-travel', 'Restore to any point within the archived WAL window. Undo mistakes.'],
   ['🤖', 'A database per agent', 'Each AI agent gets an isolated, disposable database over a simple HTTP call.'],
-  ['💤', 'Serverless', 'Idle branches suspend automatically; the proxy wakes them on the next connection.'],
+  ['💤', 'Serverless', 'Idle branches suspend automatically; the gateway wakes them on the next connection.'],
   ['☁️', 'High availability', 'A streaming standby with a promotion that reroutes clients transparently.'],
-  ['🔌', 'One endpoint', 'A wire-protocol proxy routes by database name to any branch — one stable address.'],
+  ['🔌', 'One endpoint', 'A smart gateway reads the database name and routes you to the right branch — one stable address.'],
 ]
 
 export default function Landing() {
@@ -23,11 +23,7 @@ export default function Landing() {
             agent, and high availability — at native transaction speed.
           </p>
           <div className="cta">
-            <Link className="btn" to="/docs">Get started</Link>
-            {user
-              ? <Link className="btn ghost" to="/dashboard">Open dashboard</Link>
-              : <Link className="btn ghost" to="/login">Log in</Link>}
-            <a className="btn ghost" href="https://github.com/SauravYadav12/vectoraDB" target="_blank" rel="noreferrer">GitHub ↗</a>
+            <Link className="btn" to="/guide">Get started</Link>
           </div>
         </div>
 
@@ -65,7 +61,7 @@ export default function Landing() {
             Postgres — created in seconds regardless of size, storing only the blocks it changes. Perfect for a
             per-PR database, a safe migration rehearsal, or a sandbox for every agent.
           </p>
-          <Link className="btn ghost" to="/docs">See how it works</Link>
+          <Link className="btn ghost" to="/guide">See how it works</Link>
         </div>
         <BranchGraph />
       </div>
@@ -74,7 +70,7 @@ export default function Landing() {
       <div className="steps">
         <div className="step"><span className="n">1</span><b>Native hot path</b><p className="muted">Stock PostgreSQL on local storage — full-speed commits and reads.</p></div>
         <div className="step"><span className="n">2</span><b>Off-path durability</b><p className="muted">Async WAL archival to object storage powers time-travel &amp; recovery.</p></div>
-        <div className="step"><span className="n">3</span><b>Instant branches</b><p className="muted">ZFS copy-on-write clones, one proxy endpoint, auto-suspend.</p></div>
+        <div className="step"><span className="n">3</span><b>Instant branches</b><p className="muted">ZFS copy-on-write clones, one gateway endpoint, auto-suspend.</p></div>
       </div>
 
       <div className="builton">
