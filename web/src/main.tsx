@@ -8,6 +8,7 @@ import { AuthProvider, useAuth } from './auth-context'
 import Landing from './pages/Landing'
 import Docs from './pages/Docs'
 import Guide from './pages/Guide'
+import Ledger from './pages/Ledger'
 import { ConfirmProvider } from './confirm'
 import Dashboard from './pages/Dashboard'
 import Console from './pages/Console'
@@ -72,6 +73,7 @@ function Layout() {
           <NavLink to="/docs">Docs</NavLink>
           {user && <>
             <NavLink to="/dashboard">Dashboard</NavLink>
+            <NavLink to="/ledger">Ledger</NavLink>
             <NavLink to="/console">Console</NavLink>
             <NavLink to="/keys">API keys</NavLink>
           </>}
@@ -104,6 +106,7 @@ const router = createBrowserRouter([
       { path: 'guide', element: <Guide /> },
       { path: 'login', element: <Login /> },
       { path: 'dashboard', element: <RequireAuth><Dashboard /></RequireAuth> },
+      { path: 'ledger', element: <RequireAuth><Ledger /></RequireAuth> },
       { path: 'console', element: <RequireAuth><Console /></RequireAuth> },
       { path: 'keys', element: <RequireAuth><ApiKeys /></RequireAuth> },
     ],

@@ -7,7 +7,8 @@
 set -uo pipefail
 
 S="${VECTORADB_BIN:-/tmp/vdb}"
-GATEWAY="postgresql://vectoradb:vectoradb@127.0.0.1:6432"
+# The Gateway authenticates with an API key, passed via PGPASSWORD where used.
+GATEWAY="postgresql://vectoradb@127.0.0.1:6432"
 PASS=0
 FAIL=0
 
@@ -26,6 +27,8 @@ KEY="$($S apikey create test@vectoradb.dev ci 2>/dev/null | grep -o 'vdb_[A-Za-z
 AUTH="Authorization: Bearer $KEY"
 assert_eq "unauthenticated API is rejected" "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/api/status)" "401"
 assert_eq "control plane reports main ready" "$(curl -s -H "$AUTH" localhost:8080/api/status | jget mainReady)" "True"
+assert_eq "gateway rejects a bad key" "$(PGPASSWORD=nope psql "$GATEWAY/main" -tAc 'select 1' 2>&1 | grep -c 'invalid API key')" "1"
+assert_eq "gateway accepts the API key" "$(PGPASSWORD="$KEY" psql "$GATEWAY/main" -tAc 'select 1' 2>/dev/null)" "1"
 
 echo "### 2. branch isolation"
 $S branch delete itb >/dev/null 2>&1
@@ -59,7 +62,7 @@ echo "### 6. HA: replication + failover"
 $S ha enable >/dev/null 2>&1; sleep 2
 assert_eq "standby is streaming" "$(pg vec-main "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")" "1"
 $S ha failover >/dev/null 2>&1; sleep 3
-W="$(psql "$GATEWAY/main" -tAqc "INSERT INTO pit VALUES (99) RETURNING 'okwrite'" 2>&1 | head -1)"
+W="$(PGPASSWORD="$KEY" psql "$GATEWAY/main" -tAqc "INSERT INTO pit VALUES (99) RETURNING 'okwrite'" 2>&1 | head -1)"
 assert_eq "write succeeds via gateway after failover" "$W" "okwrite"
 $S ha disable >/dev/null 2>&1; $S up >/dev/null 2>&1; sleep 3
 
@@ -74,6 +77,18 @@ assert_eq "ordinary branch is suspended" "$(sudo docker inspect -f '{{.State.Sta
 kill "$RP" 2>/dev/null
 $S branch delete rgn >/dev/null 2>&1
 $S ha disable >/dev/null 2>&1
+
+echo "### 8. schema ledger (RECORD layer)"
+pg vec-main "SET vdb.allow_destructive=on; DROP TABLE IF EXISTS ledg CASCADE" >/dev/null 2>&1
+pg vec-main "DELETE FROM vdb.schema_ledger" >/dev/null 2>&1
+PGPASSWORD="$KEY" psql "$GATEWAY/main" -qc "CREATE TABLE ledg(x int)" >/dev/null 2>&1
+assert_eq "ledger captures DDL, attributed to the human key" \
+  "$(pg vec-main "SELECT actor_kind FROM vdb.schema_ledger WHERE command_tag='CREATE TABLE' AND object_identity='public.ledg'")" "human"
+BLK="$(PGPASSWORD="$KEY" psql "$GATEWAY/main" -qc "DROP TABLE ledg" 2>&1 | grep -c 'blocked by policy')"
+assert_eq "guardrail blocks a destructive DROP" "$BLK" "1"
+assert_eq "blocked attempt is recorded durably" \
+  "$(pg vec-main "SELECT count(*) FROM vdb.schema_ledger WHERE status='BLOCKED' AND command_tag='DROP TABLE'")" "1"
+pg vec-main "SET vdb.allow_destructive=on; DROP TABLE IF EXISTS ledg" >/dev/null 2>&1
 
 echo "### cleanup"
 $S branch delete itb >/dev/null 2>&1

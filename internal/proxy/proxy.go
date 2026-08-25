@@ -12,11 +12,23 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
 )
+
+// authStore verifies API keys presented as the connection password. When nil
+// (VECTORADB_GATEWAY_NOAUTH), the Gateway accepts any client and still mediates
+// the backend login — convenient for trusted/local use.
+var authStore *auth.Store
+
+func gatewayNoAuth() bool {
+	v := os.Getenv("VECTORADB_GATEWAY_NOAUTH")
+	return v == "1" || v == "true"
+}
 
 // lastActivity tracks when the proxy last routed a connection to each branch, so
 // the reaper can suspend branches that have been idle.
@@ -36,6 +48,10 @@ func touch(name string) {
 // this before forwarding to the backend.
 const realDatabase = "vectoradb"
 
+// realUser is the Postgres role inside every branch. The Gateway always logs in
+// to the backend as this role (using the API key only to gate the client).
+const realUser = "vectoradb"
+
 const (
 	codeStartup30 = 196608   // protocol 3.0 StartupMessage
 	codeSSL       = 80877103 // SSLRequest
@@ -46,6 +62,16 @@ const (
 // auto-resuming suspended branches on connect and auto-suspending branches idle
 // for longer than idle (0 disables suspension).
 func Serve(addr string, idle time.Duration) error {
+	if gatewayNoAuth() {
+		log.Printf("gateway authentication DISABLED (VECTORADB_GATEWAY_NOAUTH) — trusted/local mode")
+	} else {
+		store, err := auth.OpenFromEnv()
+		if err != nil {
+			return fmt.Errorf("open auth store: %w", err)
+		}
+		authStore = store
+		log.Printf("gateway authentication ENABLED — connect with an API key (vdb_…) as the password")
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -73,6 +99,24 @@ func handle(client net.Conn) {
 		log.Printf("startup: %v", err)
 		return
 	}
+
+	// Gateway authentication: the client's password must be a valid API key.
+	// The authenticated identity becomes the ledger "actor" for this session.
+	var actor string
+	if authStore != nil {
+		key, err := requestClientPassword(client)
+		if err != nil {
+			log.Printf("gateway auth: %v", err)
+			return
+		}
+		u, ok := authStore.VerifyKey(key)
+		if !ok {
+			sendError(client, "28P01", "invalid API key — use a vdb_ key as the password")
+			return
+		}
+		actor = u.Email
+	}
+
 	target := params["database"]
 	if target == "" {
 		target = "main"
@@ -95,11 +139,21 @@ func handle(client net.Conn) {
 	}
 	defer backend.Close()
 
-	// The backend's real database is always vectoradb; the branch name was only a
-	// routing key.
+	// Log in to the backend as the real role/database; the branch name and client
+	// user were only routing/identity inputs. The Gateway performs the backend
+	// handshake so the client never needs the real DB password.
 	params["database"] = realDatabase
-	if _, err := backend.Write(buildStartup(params)); err != nil {
-		log.Printf("forward startup: %v", err)
+	params["user"] = realUser
+	// Attribution for the schema ledger: inject connection context that the
+	// branch's DDL event triggers read via current_setting('vectoradb.*').
+	params["options"] = ledgerOptions(params["options"], actor, target)
+	if err := backendAuth(backend, params); err != nil {
+		log.Printf("backend auth %s: %v", addr, err)
+		sendError(client, "08006", fmt.Sprintf("branch %q authentication failed", target))
+		return
+	}
+	// Authentication (client + backend) complete — tell the client it's in.
+	if err := writeAuthOk(client); err != nil {
 		return
 	}
 	log.Printf("routed: dbname=%s -> %s", target, addr)

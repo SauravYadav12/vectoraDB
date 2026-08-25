@@ -6,7 +6,7 @@
 set -uo pipefail
 
 S="${VECTORADB_BIN:-/tmp/vdb}"
-GATEWAY="postgres://vectoradb:vectoradb@127.0.0.1:6432"
+GATEWAY="postgres://vectoradb@127.0.0.1:6432" # auth via an API key in PGPASSWORD
 say() { echo; echo "──▶ $*"; echo; }
 sql() { psql "$GATEWAY/$1" -c "$2"; }
 pg()  { sudo docker exec -e PGPASSWORD=vectoradb "$1" psql -U vectoradb -d vectoradb "${@:2}"; }
@@ -14,6 +14,10 @@ pg()  { sudo docker exec -e PGPASSWORD=vectoradb "$1" psql -U vectoradb -d vecto
 say "Bringing VectoraDB up (stack + gateway + control API + agent API)"
 $S start >/dev/null 2>&1; sleep 4
 $S status 2>&1 | sed -n '1,12p'
+
+# The Gateway requires an API key as the password — mint one and use it for psql.
+printf 'demo\n' | $S user create demo@vectoradb.dev >/dev/null 2>&1 || true
+export PGPASSWORD="$($S apikey create demo@vectoradb.dev demo 2>/dev/null | grep -o 'vdb_[A-Za-z0-9_-]*')"
 
 say "Create an instant copy-on-write branch 'demo' (note the time)"
 $S branch delete demo >/dev/null 2>&1

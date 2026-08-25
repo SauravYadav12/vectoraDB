@@ -179,7 +179,7 @@ vdb stop              <span class="c"># stop everything</span></code></pre>
 vdb branch list                <span class="c"># see branches + their copy-on-write size</span></code></pre>
 
   <h3>Create the schema (psql through the gateway)</h3>
-  <pre><code>psql <span class="s">"postgres://vectoradb:vectoradb@localhost:6432/dev"</span> <span class="c"># or /main</span>
+  <pre><code>psql <span class="s">"postgres://vectoradb:&lt;API_KEY&gt;@localhost:6432/dev"</span> <span class="c"># or /main</span>
 
 <span class="k">CREATE TABLE</span> notes (
   id          <span class="k">serial PRIMARY KEY</span>,
@@ -189,11 +189,12 @@ vdb branch list                <span class="c"># see branches + their copy-on-wr
 );</code></pre>
 
   <div class="note">Prefer a GUI or your ORM's migrations? Point them at the same
-  <code>postgres://vectoradb:vectoradb@localhost:6432/&lt;branch&gt;</code> URL — VectoraDB is just
+  <code>postgres://vectoradb:&lt;API_KEY&gt;@localhost:6432/&lt;branch&gt;</code> URL — VectoraDB is just
   PostgreSQL, so tools like Prisma Migrate, Alembic, golang-migrate, Flyway, and TablePlus all work.</div>
 
   <div class="foot"><b>Connection recap:</b> host <code>localhost</code> · port <code>6432</code> ·
-  user <code>vectoradb</code> · password <code>vectoradb</code> · database <code>= branch name</code>.</div>
+  user <code>vectoradb</code> · password <code>= your API key</code> · database <code>= branch name</code>.
+  Create a key on the <b>API keys</b> page (or <code>vdb apikey create &lt;email&gt;</code>).</div>
 </section>
 
 <!-- ===================== PAGE 3 ===================== -->
@@ -203,9 +204,11 @@ vdb branch list                <span class="c"># see branches + their copy-on-wr
   library. Nothing VectoraDB-specific is required in your code.</p>
 
   <pre><code><span class="c"># .env</span>
-DATABASE_URL=postgres://vectoradb:vectoradb@localhost:6432/dev</code></pre>
+DATABASE_URL=postgres://vectoradb:&lt;API_KEY&gt;@localhost:6432/dev</code></pre>
   <div class="note"><b>Why <code>postgres://</code>?</b> Because VectoraDB <i>is</i> PostgreSQL — the scheme
   tells your driver to speak the standard protocol, so every Postgres client and ORM connects with no changes.</div>
+  <div class="note"><b>The password is your API key.</b> The Gateway (<code>:6432</code>) requires a valid key —
+  create one on the <b>API keys</b> page (or <code>vdb apikey create &lt;email&gt;</code>) and use it as the password.</div>
 
   <h3>Node.js — <code>pg</code></h3>
   <pre><code><span class="k">import</span> { Pool } <span class="k">from</span> <span class="s">'pg'</span>
@@ -328,7 +331,7 @@ console.log(rows[<span class="s">0</span>])</code></pre>
 
   <pre><code>vdb branch create feature-x                 <span class="c"># seconds, near-zero disk</span>
 <span class="c"># in your app / CI:</span>
-DATABASE_URL=postgres://vectoradb:vectoradb@localhost:6432/feature-x
+DATABASE_URL=postgres://vectoradb:&lt;API_KEY&gt;@localhost:6432/feature-x
 <span class="c"># …run migrations, tests, a demo, anything…</span>
 vdb branch delete feature-x                 <span class="c"># throw it away; main is untouched</span></code></pre>
 
@@ -354,7 +357,7 @@ curl -H <span class="s">"Authorization: Bearer $VDB_KEY"</span> \
     <thead><tr><th>Task</th><th>Command / value</th></tr></thead>
     <tbody>
       <tr><td>Start / stop everything</td><td><code>vdb start</code> · <code>vdb stop</code></td></tr>
-      <tr><td>Connection string</td><td><code>postgres://vectoradb:vectoradb@localhost:6432/&lt;branch&gt;</code></td></tr>
+      <tr><td>Connection string</td><td><code>postgres://vectoradb:&lt;API_KEY&gt;@localhost:6432/&lt;branch&gt;</code></td></tr>
       <tr><td>Create / list / delete a branch</td><td><code>vdb branch create|list|delete &lt;name&gt;</code></td></tr>
       <tr><td>Open a SQL shell on a branch</td><td><code>psql "…6432/&lt;branch&gt;"</code></td></tr>
       <tr><td>Time-travel (point-in-time restore)</td><td><code>vdb backup create</code> · <code>vdb restore --to latest</code></td></tr>

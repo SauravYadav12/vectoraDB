@@ -9,6 +9,24 @@ function Dot({ up }: { up: boolean }) {
   return <span className={'dot ' + (up ? 'up' : 'down')} />
 }
 
+function CopyBtn({ text }: { text: string }) {
+  const [done, setDone] = useState(false)
+  return (
+    <button
+      className={'copy-icon' + (done ? ' done' : '')}
+      title={done ? 'Copied!' : 'Copy connection string'}
+      aria-label="Copy connection string"
+      onClick={() => { navigator.clipboard?.writeText(text); setDone(true); setTimeout(() => setDone(false), 1200) }}
+    >
+      {done ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+      )}
+    </button>
+  )
+}
+
 function toBytes(s: string): number {
   const m = /^([\d.]+)\s*([KMGT]?)/i.exec(s || '')
   if (!m) return 0
@@ -106,7 +124,7 @@ export default function Dashboard() {
               .sort((a, b) => (a.primary ? -1 : b.primary ? 1 : a.name.localeCompare(b.name)))
               .map(b => {
                 const running = b.state === 'running'
-                const dsn = `postgres://vectoradb:vectoradb@localhost:6432/${b.name}`
+                const dsn = `postgres://vectoradb:<API_KEY>@localhost:6432/${b.name}`
                 const type = b.primary ? 'primary' : b.agent ? 'agent' : 'branch'
                 const pct = Math.max(6, Math.round((toBytes(b.used) / maxUsed) * 100))
                 return (
@@ -121,7 +139,12 @@ export default function Dashboard() {
                       </div>
                     </td>
                     <td>{running ? b.connections : '—'}</td>
-                    <td><span className="dsn" title="click to copy" onClick={() => navigator.clipboard?.writeText(dsn)}>{dsn}</span></td>
+                    <td className="dsn-cell">
+                      <div className="dsn-row">
+                        <span className="dsn" title="Copy connection string" onClick={() => navigator.clipboard?.writeText(dsn)}>{dsn}</span>
+                        <CopyBtn text={dsn} />
+                      </div>
+                    </td>
                     <td>
                       <div className="actions">
                         {!b.primary && (running

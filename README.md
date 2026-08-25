@@ -94,7 +94,7 @@ make web-dev   # http://localhost:5173  (Landing · Docs · Dashboard · SQL Con
 ```
 
 Other endpoints: control API `http://localhost:8080/api`, gateway
-`postgres://vectoradb:vectoradb@localhost:6432/<branch>`, agent API
+`postgres://vectoradb:<API_KEY>@localhost:6432/<branch>`, agent API
 `http://localhost:8088`, object storage `http://localhost:9001`.
 
 ### Web app (`web/`)
@@ -136,12 +136,18 @@ vdb down               # stop containers (ZFS datasets preserved)
 
 `vdb gateway` exposes one PostgreSQL endpoint (`:6432`) and routes each
 connection to the branch named by the `database` parameter — so clients use one
-stable address instead of per-branch ports:
+stable address instead of per-branch ports. **The gateway authenticates with an
+API key used as the password** — mint one with `vdb apikey create <email>` (or on
+the web *API keys* page). Set it once and connect normally:
 
 ```bash
-psql "postgresql://vectoradb:vectoradb@127.0.0.1:6432/main"        # -> main
-psql "postgresql://vectoradb:vectoradb@127.0.0.1:6432/agent-bob"   # -> bob's branch
+export PGPASSWORD="vdb_…"                                     # your API key
+psql "postgresql://vectoradb@127.0.0.1:6432/main"            # -> main
+psql "postgresql://vectoradb@127.0.0.1:6432/agent-bob"       # -> bob's branch
+# (or inline: postgresql://vectoradb:<API_KEY>@127.0.0.1:6432/main)
 ```
+
+> Set `VECTORADB_GATEWAY_NOAUTH=1` to disable gateway auth for trusted/local use.
 
 **Auto-suspend / auto-resume (serverless behaviour).** The gateway suspends any
 branch idle longer than `--idle` (default `2m`, `--idle 0` to disable) and

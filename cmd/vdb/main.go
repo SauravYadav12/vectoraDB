@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,10 @@ Branching:
   branch delete <name>  Stop and destroy a branch
   branch suspend <name> Stop a branch (data preserved); resumes on next connect
   branch resume <name>  Start a suspended branch
+
+Schema ledger (RECORD layer):
+  ledger [branch] [--limit N]  Show captured DDL changes — attributed & policy-checked
+  ledger revert --to <ts>      Time-travel revert of a branch's schema+data to a moment
 
 High availability:
   ha enable            Provision a hot standby streaming from main
@@ -170,6 +175,8 @@ func main() {
 		must(branch.Restore(ts))
 	case "branch":
 		branchCmd(os.Args[2:])
+	case "ledger":
+		ledgerCmd(os.Args[2:])
 	case "ha":
 		haCmd(os.Args[2:])
 	case "user":
@@ -206,6 +213,33 @@ func restoreArg(args []string) string {
 		return args[1]
 	}
 	return args[0]
+}
+
+// ledgerCmd handles `vdb ledger [branch] [--limit N]` and
+// `vdb ledger revert --to <ts>` (time-travel restore of the branch's schema+data).
+func ledgerCmd(args []string) {
+	if len(args) > 0 && args[0] == "revert" {
+		ts := restoreArg(args[1:])
+		if ts == "" {
+			fmt.Println("usage: vdb ledger revert --to '<timestamp>'|latest")
+			os.Exit(2)
+		}
+		fmt.Println("Reverting via time-travel restore (disposable container on :5433)…")
+		must(branch.Restore(ts))
+		return
+	}
+	name, limit := "main", 50
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--limit" && i+1 < len(args) {
+			if n, err := strconv.Atoi(args[i+1]); err == nil {
+				limit = n
+			}
+			i++
+		} else if !strings.HasPrefix(args[i], "-") {
+			name = args[i]
+		}
+	}
+	must(branch.Ledger(name, limit))
 }
 
 // addrFlag parses `--addr <addr>`, falling back to def.

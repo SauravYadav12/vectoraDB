@@ -69,3 +69,7 @@ export const suspendBranch = (name: string) => req('POST', `${API}/api/branches/
 export const resumeBranch = (name: string) => req('POST', `${API}/api/branches/${name}/resume`)
 export const runQuery = (name: string, sql: string) =>
   req('POST', `${API}/api/branches/${name}/query`, { sql }) as Promise<QueryResult>
+export const getLedger = (name: string, filters: Record<string, string> = {}) => {
+  const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => v)).toString()
+  return req('GET', `${API}/api/branches/${name}/ledger${qs ? '?' + qs : ''}`) as Promise<QueryResult>
+}

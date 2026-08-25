@@ -91,7 +91,7 @@ sudo vdb start`}</Code>
         database — use plain SQL or your migration tool.</p>
       <Code>{`vdb branch create dev          # instant copy-on-write branch of main
 vdb branch list                # branches + their copy-on-write size`}</Code>
-      <Code>{`psql "postgres://vectoradb:vectoradb@localhost:6432/dev"
+      <Code>{`psql "postgres://vectoradb:<API_KEY>@localhost:6432/dev"
 
 CREATE TABLE notes (
   id          serial PRIMARY KEY,
@@ -100,14 +100,16 @@ CREATE TABLE notes (
   created_at  timestamptz DEFAULT now()
 );`}</Code>
       <p className="muted">Prefer migrations? Point Prisma, Alembic, golang-migrate, Flyway, etc. at the
-        same <code>postgres://vectoradb:vectoradb@localhost:6432/&lt;branch&gt;</code> URL.</p>
+        same <code>postgres://vectoradb:&lt;API_KEY&gt;@localhost:6432/&lt;branch&gt;</code> URL.</p>
 
       <h2>3 · Connect from your application</h2>
       <p>Put the connection string in an env var and use your language's standard Postgres library.</p>
       <Code>{`# .env
-DATABASE_URL=postgres://vectoradb:vectoradb@localhost:6432/dev`}</Code>
+DATABASE_URL=postgres://vectoradb:<API_KEY>@localhost:6432/dev`}</Code>
       <p className="muted"><strong>Why <code>postgres://</code>?</strong> Because VectoraDB <em>is</em> PostgreSQL —
         the scheme tells your driver to speak the standard protocol, so every Postgres client and ORM connects with no changes.</p>
+      <p className="muted"><strong>The password is your API key.</strong> The Gateway (<code>:6432</code>) requires a valid
+        key — create one on the <a href="/keys">API keys</a> page (or <code>vdb apikey create &lt;email&gt;</code>) and use it as the password.</p>
 
       <h3>Node.js — <code>pg</code></h3>
       <Code>{`import { Pool } from 'pg'
@@ -153,7 +155,7 @@ await pool.query('DELETE FROM notes WHERE id=$1', [rows[0].id])`}</Code>
         no disk). Point your app or CI at it, do anything, throw it away. <code>main</code> is never touched.</p>
       <Code>{`vdb branch create feature-x                 # seconds, near-zero disk
 # in your app / CI:
-DATABASE_URL=postgres://vectoradb:vectoradb@localhost:6432/feature-x
+DATABASE_URL=postgres://vectoradb:<API_KEY>@localhost:6432/feature-x
 # …run migrations, tests, a demo, anything…
 vdb branch delete feature-x                 # throw it away; main is untouched`}</Code>
       <ul>
@@ -174,7 +176,7 @@ curl -H "Authorization: Bearer $VDB_KEY" -X DELETE localhost:8088/agents/alice/b
         <thead><tr><th>Task</th><th>Command / value</th></tr></thead>
         <tbody>
           <tr><td>Start / stop everything</td><td><code>vdb start</code> · <code>vdb stop</code></td></tr>
-          <tr><td>Connection string</td><td><code>postgres://vectoradb:vectoradb@localhost:6432/&lt;branch&gt;</code></td></tr>
+          <tr><td>Connection string</td><td><code>postgres://vectoradb:&lt;API_KEY&gt;@localhost:6432/&lt;branch&gt;</code></td></tr>
           <tr><td>Create / list / delete a branch</td><td><code>vdb branch create|list|delete &lt;name&gt;</code></td></tr>
           <tr><td>Time-travel (PITR)</td><td><code>vdb backup create</code> · <code>vdb restore --to latest</code></td></tr>
           <tr><td>Web console &amp; dashboard</td><td><code>make web-dev</code> → <code>localhost:5173</code></td></tr>

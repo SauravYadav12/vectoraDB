@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -149,6 +150,54 @@ func registerAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, runQuery(addr, body.SQL))
 	})
+
+	// Schema ledger (RECORD layer): the queryable history of DDL changes on a
+	// branch, filterable by actor/table/risk/status/kind/time.
+	mux.HandleFunc("GET /api/branches/{name}/ledger", func(w http.ResponseWriter, r *http.Request) {
+		addr, err := branch.EnsureRunning(r.PathValue("name"))
+		if err != nil {
+			writeErr(w, 404, err)
+			return
+		}
+		writeJSON(w, 200, runQuery(addr, ledgerSQL(r.URL.Query())))
+	})
+}
+
+func sqlEsc(s string) string { return strings.ReplaceAll(s, "'", "''") }
+
+// ledgerSQL builds a filtered, bounded query over vdb.schema_ledger. Filter
+// values are single-quote-escaped and only ever appear as string literals.
+func ledgerSQL(q url.Values) string {
+	where := []string{"true"}
+	like := func(col, v string) {
+		if v = strings.TrimSpace(v); v != "" {
+			where = append(where, fmt.Sprintf("%s ILIKE '%%%s%%'", col, sqlEsc(v)))
+		}
+	}
+	eq := func(col, v string) {
+		if v = strings.TrimSpace(v); v != "" {
+			where = append(where, fmt.Sprintf("%s = '%s'", col, sqlEsc(v)))
+		}
+	}
+	like("actor", q.Get("actor"))
+	like("object_identity", q.Get("table"))
+	eq("risk", q.Get("risk"))
+	eq("status", q.Get("status"))
+	eq("actor_kind", q.Get("kind"))
+	if v := strings.TrimSpace(q.Get("since")); v != "" {
+		where = append(where, fmt.Sprintf("at >= '%s'", sqlEsc(v)))
+	}
+	if v := strings.TrimSpace(q.Get("until")); v != "" {
+		where = append(where, fmt.Sprintf("at <= '%s'", sqlEsc(v)))
+	}
+	limit := 200
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 && n <= 2000 {
+		limit = n
+	}
+	return fmt.Sprintf(`SELECT to_char(at,'YYYY-MM-DD HH24:MI:SS') AS at, actor, actor_kind, tool,
+		branch, command_tag, object_identity, statement, status, risk
+		FROM vdb.schema_ledger WHERE %s ORDER BY at DESC LIMIT %d`,
+		strings.Join(where, " AND "), limit)
 }
 
 // runQuery executes SQL against a branch backend and returns columns/rows (or an

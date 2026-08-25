@@ -193,7 +193,7 @@ pre .copy:hover { color: #fff; border-color: var(--accent); }
 .section-title { display: flex; align-items: center; gap: 10px; margin: 26px 0 8px; }
 
 /* ---------- table ---------- */
-.table-wrap { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;
+.table-wrap { border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto;
   background: var(--panel); }
 table { width: 100%; border-collapse: collapse; }
 th { text-align: left; color: var(--muted); font-size: 11.5px; text-transform: uppercase;
@@ -209,12 +209,23 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); 
 .badge.branch { color: var(--muted); }
 .state { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
 .state.running { color: var(--green); } .state.suspended { color: var(--muted); }
-.dsn { font-family: var(--font-mono); font-size: 12.3px; color: var(--muted); cursor: pointer; }
+/* The DSN column flexes to fill leftover space and truncates, so the action
+   column is never pushed out of view (max-width:0 + width:100% shrink trick). */
+.table-wrap td.dsn-cell { max-width: 0; width: 100%; }
+.dsn-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dsn { font-family: var(--font-mono); font-size: 12.3px; color: var(--muted); cursor: pointer;
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsn:hover { color: var(--accent); }
+.copy-icon { flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--border);
+  background: transparent; color: var(--muted); cursor: pointer; padding: 0; transition: color .15s, border-color .15s; }
+.copy-icon:hover { color: var(--accent); border-color: var(--accent); }
+.copy-icon.done { color: var(--green); border-color: var(--green); }
 .cow { height: 6px; width: 60px; border-radius: 4px; background: var(--panel-2);
   overflow: hidden; border: 1px solid var(--border); }
 .cow > span { display: block; height: 100%; background: var(--grad); }
-.actions { display: flex; gap: 6px; justify-content: flex-end; }
+.actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+.table-wrap td:last-child, .table-wrap th:last-child { white-space: nowrap; width: 1%; }
 
 /* ---------- landing ---------- */
 .hero { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 30px; align-items: center;
@@ -278,6 +289,57 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); 
   background: var(--term-bg); border-color: var(--border-strong); color: #d8def7; }
 .grid-wrap { overflow: auto; border: 1px solid var(--border); border-radius: 14px; margin-top: 14px; max-height: 58vh; }
 .grid-wrap table td { font-family: var(--font-mono); font-size: 12.4px; white-space: pre; }
+
+/* console schema browser */
+.console-grid { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 12px; }
+/* Let the results column shrink so a wide table scrolls inside its own box
+   instead of widening the whole page (grid items default to min-width:auto). */
+.console-grid > * { min-width: 0; }
+.obj-panel { border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); overflow: hidden; position: sticky; top: 12px; }
+.obj-head { padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 11.5px; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+.obj-head button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 4px; }
+.obj-head button:hover { color: var(--accent); }
+.obj-list { max-height: 62vh; overflow: auto; padding: 6px; }
+.obj-group { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); padding: 9px 8px 4px; }
+.obj-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 7px 9px;
+  border-radius: 8px; border: none; background: transparent; color: var(--text); font: inherit; font-size: 13px;
+  font-family: var(--font-mono); cursor: pointer; }
+.obj-item:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.obj-item.active { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.obj-item .ic { flex: none; opacity: .7; font-style: normal; }
+.obj-empty { padding: 14px; font-size: 12.5px; color: var(--muted); }
+.obj-filter { width: 100%; font-size: 13px; padding: 7px 10px; }
+.obj-item.special { color: var(--accent); font-family: inherit; font-weight: 600; }
+@media (max-width: 820px) { .console-grid { grid-template-columns: 1fr; } .obj-panel { position: static; } }
+
+/* pgweb-style object view: header + tabs */
+.obj-view-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 2px; }
+.obj-view-head h2 { margin: 0; font-size: 19px; }
+.obj-view-head .path { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.db-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 12px 0 14px; overflow-x: auto; }
+.db-tabs button { background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted);
+  padding: 9px 15px; font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer; margin-bottom: -1px; white-space: nowrap; }
+.db-tabs button:hover { color: var(--text); }
+.db-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+.pager { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+.pager button { padding: 5px 11px; }
+.pager button:disabled { opacity: .4; }
+.editor.compact { min-height: 120px; }
+
+/* schema ledger */
+.seg { display: inline-flex; gap: 2px; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 3px; }
+.seg button { border: none; background: transparent; color: var(--muted); font: inherit; font-size: 12.5px;
+  font-weight: 600; padding: 5px 11px; border-radius: 7px; cursor: pointer; }
+.seg button.active { background: var(--accent); color: #fff; }
+.lg-kind { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.lg-kind.agent { color: var(--grad-b); border-color: color-mix(in srgb, var(--grad-b) 45%, var(--border)); }
+.lg-risk { color: #f59e0b; font-size: 12px; }
+.lg-status { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 6px; letter-spacing: .03em; }
+.lg-status.APPLIED { color: var(--green); background: color-mix(in srgb, var(--green) 15%, transparent); }
+.lg-status.FLAGGED { color: #f59e0b; background: color-mix(in srgb, #f59e0b 16%, transparent); }
+.lg-status.BLOCKED { color: var(--red); background: color-mix(in srgb, var(--red) 16%, transparent); }
 .err { color: color-mix(in srgb, var(--red) 78%, var(--text)); background: color-mix(in srgb, var(--red) 14%, var(--panel));
   border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border));
   border-radius: 12px; padding: 11px 15px; margin-top: 14px; font-size: 13.5px; font-family: var(--font-mono); }

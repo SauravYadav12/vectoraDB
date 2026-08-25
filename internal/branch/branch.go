@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vectoradb/vectoradb/internal/ledger"
 )
 
 const (
@@ -138,7 +140,7 @@ func Init() error {
 		return err
 	}
 	if ContainerState("main") == "running" {
-		return nil // already up — keep it (idempotent)
+		return InstallLedger("main") // already up — ensure the ledger is present
 	}
 	if !datasetExists(dataset("main")) {
 		if err := run("zfs", "create", "-p", dataset("main")); err != nil {
@@ -151,7 +153,47 @@ func Init() error {
 	if err := startContainer("main", true); err != nil {
 		return err
 	}
-	return waitReady("main")
+	if err := waitReady("main"); err != nil {
+		return err
+	}
+	// Install the schema ledger into main; every branch (a ZFS clone) inherits it.
+	return InstallLedger("main")
+}
+
+// psqlStdin runs a (possibly multi-statement) SQL script on a branch's Postgres
+// by piping it to psql over stdin, aborting on the first error.
+func psqlStdin(name, sql string) error {
+	cmd := exec.Command("sudo", "docker", "exec", "-i",
+		"-e", "PGPASSWORD="+pgPassword, container(name),
+		"psql", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1", "-q")
+	cmd.Stdin = strings.NewReader(sql)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// InstallLedger installs (or upgrades) the schema ledger into a branch. It is
+// idempotent and safe to run repeatedly.
+func InstallLedger(name string) error {
+	return psqlStdin(name, ledger.Schema)
+}
+
+// Ledger prints a branch's schema ledger (most recent first) — the RECORD layer:
+// every DDL change, attributed and policy-checked.
+func Ledger(name string, limit int) error {
+	if name == "" {
+		name = "main"
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	q := fmt.Sprintf(`SELECT to_char(at,'MM-DD HH24:MI:SS') AS time,
+		coalesce(actor,'-') AS actor, actor_kind AS kind, coalesce(tool,'-') AS tool,
+		command_tag AS command, coalesce(object_identity,'') AS object,
+		status, coalesce(risk,'') AS risk
+		FROM vdb.schema_ledger ORDER BY at DESC LIMIT %d`, limit)
+	return run("docker", "exec", "-e", "PGPASSWORD="+pgPassword, container(name),
+		"psql", "-U", pgUser, "-d", pgDatabase, "-P", "pager=off", "-c", q)
 }
 
 // Create makes an instant copy-on-write branch of parent (default "main") and
@@ -416,6 +458,12 @@ func CreateAgentBranch(agentID string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
+	// Default this branch's attribution to the agent, so its schema ledger records
+	// direct connections as agent activity even without the Gateway in the path.
+	actor := "agent-" + strings.ReplaceAll(agentID, "'", "''")
+	_ = psqlStdin(name, fmt.Sprintf(
+		"ALTER DATABASE %s SET vdb.actor = '%s'; ALTER DATABASE %s SET vdb.actor_kind = 'agent';",
+		pgDatabase, actor, pgDatabase))
 	return Info{Agent: agentID, Branch: name, Host: "127.0.0.1", Port: port, DSN: dsn(port), Status: "ready"}, nil
 }
 
