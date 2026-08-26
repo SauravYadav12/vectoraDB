@@ -13,9 +13,11 @@ export default function ApiKeys() {
   useEffect(() => { refresh() }, [])
 
   const create = async () => {
+    const n = name.trim()
+    if (!n) return
     setErr('')
     try {
-      const r = await createKey(name.trim() || 'key')
+      const r = await createKey(n)
       setFresh(r.key)
       setName('')
       await refresh()
@@ -44,7 +46,7 @@ export default function ApiKeys() {
       <div className="row">
         <input placeholder="key name (e.g. ci, laptop)" value={name} onChange={e => setName(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') create() }} style={{ minWidth: 240 }} />
-        <button className="primary" onClick={create}>+ Create key</button>
+        <button className="primary" onClick={create} disabled={!name.trim()}>+ Create key</button>
       </div>
       {err && <div className="err">{err}</div>}
 

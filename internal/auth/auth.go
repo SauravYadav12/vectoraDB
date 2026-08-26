@@ -70,12 +70,20 @@ CREATE TABLE IF NOT EXISTS oauth_identities (
 );`
 
 // Open opens (and migrates) the SQLite store.
+//
+// The store is shared across several processes (control plane, gateway, agent
+// API), so it is opened in WAL mode with a busy timeout: concurrent writers
+// (e.g. the api_keys.last_used bump on every authenticated request) wait for the
+// lock instead of failing with SQLITE_BUSY — which would otherwise surface to
+// clients as a spurious 401.
 func Open(cfg Config) (*Store, error) {
-	db, err := sql.Open("sqlite", cfg.DBPath)
+	dsn := cfg.DBPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
 		return nil, err
 	}
 	return &Store{db: db, cfg: cfg}, nil
@@ -224,11 +232,16 @@ func (s *Store) CreateAPIKey(userID int64, name string) (string, KeyInfo, error)
 
 // VerifyKey resolves an API key to its user.
 func (s *Store) VerifyKey(key string) (User, bool) {
+	h := hashKey(key)
 	var uid int64
-	if err := s.db.QueryRow(`SELECT user_id FROM api_keys WHERE key_hash=?`, hashKey(key)).Scan(&uid); err != nil {
+	if err := s.db.QueryRow(`SELECT user_id FROM api_keys WHERE key_hash=?`, h).Scan(&uid); err != nil {
 		return User{}, false
 	}
-	_, _ = s.db.Exec(`UPDATE api_keys SET last_used=? WHERE key_hash=?`, time.Now().Unix(), hashKey(key))
+	// Best-effort, throttled last_used bump: only when stale (>60s), so a burst of
+	// concurrent auth checks doesn't turn into a burst of writes on the store.
+	now := time.Now().Unix()
+	_, _ = s.db.Exec(`UPDATE api_keys SET last_used=? WHERE key_hash=? AND (last_used IS NULL OR last_used < ?)`,
+		now, h, now-60)
 	u, err := s.userByID(uid)
 	return u, err == nil
 }

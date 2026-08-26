@@ -4,6 +4,8 @@ package auth
 
 import (
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -50,6 +52,34 @@ func TestAPIKeys(t *testing.T) {
 	}
 	if _, ok := s.VerifyKey(secret); ok {
 		t.Error("revoked key should not verify")
+	}
+}
+
+// TestVerifyKeyConcurrent reproduces the SQLITE_BUSY regression: many
+// simultaneous authenticated requests must all verify, not be rejected as
+// invalid because a concurrent last_used write hit a lock.
+func TestVerifyKeyConcurrent(t *testing.T) {
+	s := testStore(t)
+	u, _ := s.CreateUser("c@x.com", "password1")
+	secret, _, err := s.CreateAPIKey(u.ID, "ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 32
+	var wg sync.WaitGroup
+	var fails int64
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, ok := s.VerifyKey(secret); !ok {
+				atomic.AddInt64(&fails, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if fails != 0 {
+		t.Errorf("%d/%d concurrent VerifyKey calls were rejected (SQLITE_BUSY regression)", fails, n)
 	}
 }
 
