@@ -123,14 +123,20 @@ func startContainer(name string, primary bool) error {
 }
 
 func waitReady(name string) error {
-	for i := 0; i < 30; i++ {
+	// Poll frequently: a resumed branch's Postgres is usually accepting in ~0.4s,
+	// so a coarse sleep between probes dominates the auto-resume wake time. The
+	// probe (docker exec pg_isready) is itself the main cost per cycle.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
 		if exec.Command("sudo", "docker", "exec", container(name),
 			"pg_isready", "-U", pgUser, "-d", pgDatabase).Run() == nil {
 			return nil
 		}
-		time.Sleep(2 * time.Second)
+		if time.Now().After(deadline) {
+			return fmt.Errorf("branch %q did not become ready in time", name)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("branch %q did not become ready in time", name)
 }
 
 // Init creates the primary "main" dataset (if absent) and starts its Postgres
