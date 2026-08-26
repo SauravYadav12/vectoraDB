@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -230,15 +231,23 @@ func (s *Store) CreateAPIKey(userID int64, name string) (string, KeyInfo, error)
 	return secret, KeyInfo{ID: id, Name: name, Prefix: prefix, Created: now}, nil
 }
 
-// VerifyKey resolves an API key to its user.
+// VerifyKey resolves an API key to its user. A false result means "not
+// authenticated"; a genuine store failure (as opposed to an unknown key) is
+// logged so it is diagnosable rather than silently masquerading as a bad key.
 func (s *Store) VerifyKey(key string) (User, bool) {
 	h := hashKey(key)
 	var uid int64
-	if err := s.db.QueryRow(`SELECT user_id FROM api_keys WHERE key_hash=?`, h).Scan(&uid); err != nil {
+	switch err := s.db.QueryRow(`SELECT user_id FROM api_keys WHERE key_hash=?`, h).Scan(&uid); {
+	case errors.Is(err, sql.ErrNoRows):
+		return User{}, false // no such key — an ordinary auth failure
+	case err != nil:
+		log.Printf("auth: VerifyKey store error (client will see this as unauthenticated): %v", err)
 		return User{}, false
 	}
 	// Best-effort, throttled last_used bump: only when stale (>60s), so a burst of
 	// concurrent auth checks doesn't turn into a burst of writes on the store.
+	// (This makes last_used coarse by ~a minute — fine for "last active", not for
+	// real-time anomaly detection.)
 	now := time.Now().Unix()
 	_, _ = s.db.Exec(`UPDATE api_keys SET last_used=? WHERE key_hash=? AND (last_used IS NULL OR last_used < ?)`,
 		now, h, now-60)
