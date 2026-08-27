@@ -73,3 +73,14 @@ export const getLedger = (name: string, filters: Record<string, string> = {}) =>
   const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => v)).toString()
   return req('GET', `${API}/api/branches/${name}/ledger${qs ? '?' + qs : ''}`) as Promise<QueryResult>
 }
+export const importDB = (source: string, target: string) =>
+  req('POST', `${API}/api/import`, { source, target }) as Promise<{ status: string; target: string; tables: number }>
+export const importFile = async (file: File, target: string) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  if (target) fd.append('target', target)
+  const r = await fetch(`${API}/api/import/file`, { method: 'POST', credentials: 'include', body: fd })
+  const data = await r.json().catch(() => ({}))
+  if (!r.ok) throw new ApiError(r.status, (data && (data as { error?: string }).error) || `HTTP ${r.status}`)
+  return data as { status: string; target: string; tables: number }
+}

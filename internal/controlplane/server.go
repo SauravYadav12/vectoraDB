@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -149,6 +150,50 @@ func registerAPI(mux *http.ServeMux) {
 			return
 		}
 		writeJSON(w, 200, runQuery(addr, body.SQL))
+	})
+
+	// Migration: import a source database into a new instance. The web wizard
+	// only accepts a postgres:// source (no arbitrary server file paths from a
+	// browser); file imports (.sql/.csv/.json) go through the `vdb import` CLI.
+	mux.HandleFunc("POST /api/import", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Source string `json:"source"`
+			Target string `json:"target"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		body.Source = strings.TrimSpace(body.Source)
+		if !strings.HasPrefix(body.Source, "postgres://") && !strings.HasPrefix(body.Source, "postgresql://") {
+			writeErr(w, 400, fmt.Errorf("web import needs a postgres:// source; use `vdb import` for .sql/.csv/.json files"))
+			return
+		}
+		target, err := branch.Import(body.Source, strings.TrimSpace(body.Target))
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"status": "imported", "target": target, "tables": branch.TableCount(target)})
+	})
+
+	// Migration via file upload: a .sql/.csv/.json file streamed from the browser
+	// into a new instance (kind inferred from the filename).
+	mux.HandleFunc("POST /api/import/file", func(w http.ResponseWriter, r *http.Request) {
+		file, hdr, err := r.FormFile("file")
+		if err != nil {
+			writeErr(w, 400, fmt.Errorf("a file is required"))
+			return
+		}
+		defer file.Close()
+		kind, err := branch.ParseKind(filepath.Ext(hdr.Filename))
+		if err != nil {
+			writeErr(w, 400, err)
+			return
+		}
+		target, err := branch.ImportReader(file, kind, hdr.Filename, strings.TrimSpace(r.FormValue("target")))
+		if err != nil {
+			writeErr(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"status": "imported", "target": target, "tables": branch.TableCount(target)})
 	})
 
 	// Schema ledger (RECORD layer): the queryable history of DDL changes on a

@@ -64,6 +64,10 @@ Schema ledger (RECORD layer):
   ledger [branch] [--limit N]  Show captured DDL changes — attributed & policy-checked
   ledger revert --to <ts>      Time-travel revert of a branch's schema+data to a moment
 
+Migration:
+  import --from <src> [--as <name>]  Migrate a DB into a new instance. <src> is a
+                       postgres://… connection string or a .sql / .csv / .json file
+
 High availability:
   ha enable            Provision a hot standby streaming from main
   ha status            Show replication status (primary + standby)
@@ -177,6 +181,8 @@ func main() {
 		branchCmd(os.Args[2:])
 	case "ledger":
 		ledgerCmd(os.Args[2:])
+	case "import":
+		importCmd(os.Args[2:])
 	case "ha":
 		haCmd(os.Args[2:])
 	case "user":
@@ -213,6 +219,54 @@ func restoreArg(args []string) string {
 		return args[1]
 	}
 	return args[0]
+}
+
+// importCmd handles `vdb import --from <source> [--as <instance>]`, migrating a
+// Postgres source or a .sql/.csv/.json file into a fresh VectoraDB instance.
+func importCmd(args []string) {
+	var source, target, kind, srcname string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--from":
+			if i+1 < len(args) {
+				source, i = args[i+1], i+1
+			}
+		case "--as", "--to":
+			if i+1 < len(args) {
+				target, i = args[i+1], i+1
+			}
+		case "--kind": // for streamed (--from -) imports: sql|csv|json
+			if i+1 < len(args) {
+				kind, i = args[i+1], i+1
+			}
+		case "--srcname": // origin name for a streamed import (default target/table)
+			if i+1 < len(args) {
+				srcname, i = args[i+1], i+1
+			}
+		default:
+			if source == "" && !strings.HasPrefix(args[i], "-") {
+				source = args[i]
+			}
+		}
+	}
+	if source == "" {
+		fmt.Println("usage: vdb import --from <postgres://… | file.sql|.csv|.json> [--as <instance>]")
+		os.Exit(2)
+	}
+	// A dash means the file is streamed on stdin (used when the launcher forwards
+	// a local file from the client machine into the VM).
+	if source == "-" {
+		k, err := branch.ParseKind(kind)
+		must(err)
+		if srcname == "" {
+			srcname = "stdin"
+		}
+		_, err = branch.ImportReader(os.Stdin, k, srcname, target)
+		must(err)
+		return
+	}
+	_, err := branch.Import(source, target)
+	must(err)
 }
 
 // ledgerCmd handles `vdb ledger [branch] [--limit N]` and

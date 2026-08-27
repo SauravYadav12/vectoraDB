@@ -10,6 +10,7 @@ package host
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,6 +48,12 @@ func Maybe(args []string) (handled bool, err error) {
 	}
 	switch runtime.GOOS {
 	case "darwin":
+		// `vdb import --from <local file>`: stream the file from this machine into
+		// the VM (so imports work from ANY path, not just Lima-mounted ~).
+		if newArgs, f, ok := importLocalFile(args); ok {
+			defer f.Close()
+			return true, forwardStdin(newArgs, f)
+		}
 		return true, forward(args)
 	case "windows":
 		return true, fmt.Errorf(
@@ -129,7 +136,9 @@ func guestBin(name string) string {
 	return "/tmp/vdb"
 }
 
-func forward(args []string) error {
+func forward(args []string) error { return forwardStdin(args, os.Stdin) }
+
+func forwardStdin(args []string, stdin io.Reader) error {
 	if _, err := exec.LookPath("limactl"); err != nil {
 		return fmt.Errorf("Lima is required on macOS. Install it with `brew install lima`, then run `vdb setup`")
 	}
@@ -145,7 +154,64 @@ func forward(args []string) error {
 	}
 	guest := guestBin(name)
 	full := append([]string{"shell", name, "--", "env", envInGuest + "=1", guest}, args...)
-	return limactl(full...).Run()
+	cmd := exec.Command("limactl", full...)
+	cmd.Stdin = stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// importLocalFile detects `vdb import --from <path>` where <path> is a readable
+// file on THIS machine, and rewrites it to stream that file into the VM over
+// stdin (`--from -`). Returns false for a postgres:// source or a path that
+// isn't a local file (which is forwarded unchanged — it may exist in the VM).
+func importLocalFile(args []string) ([]string, *os.File, bool) {
+	if len(args) == 0 || args[0] != "import" {
+		return nil, nil, false
+	}
+	path, fromFlag := "", false
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--from" && i+1 < len(args) {
+			path, fromFlag = args[i+1], true
+			break
+		}
+	}
+	if path == "" {
+		for i := 1; i < len(args); i++ {
+			if !strings.HasPrefix(args[i], "-") && !isPostgresURL(args[i]) {
+				path = args[i]
+				break
+			}
+		}
+	}
+	if path == "" || isPostgresURL(path) {
+		return nil, nil, false
+	}
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return nil, nil, false // not a local file — forward as-is (may exist in the VM)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, false
+	}
+	var rest []string
+	for i := 1; i < len(args); i++ {
+		if fromFlag && args[i] == "--from" && i+1 < len(args) {
+			i++ // drop `--from <val>`
+			continue
+		}
+		if !fromFlag && args[i] == path {
+			continue // drop the bare source
+		}
+		rest = append(rest, args[i])
+	}
+	kind := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	out := append([]string{"import", "--from", "-", "--kind", kind, "--srcname", filepath.Base(path)}, rest...)
+	return out, f, true
+}
+
+func isPostgresURL(s string) bool {
+	return strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://")
 }
 
 func setupDarwin() error {
