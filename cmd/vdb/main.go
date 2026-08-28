@@ -24,6 +24,7 @@ import (
 	"github.com/vectoradb/vectoradb/internal/host"
 	"github.com/vectoradb/vectoradb/internal/proxy"
 	"github.com/vectoradb/vectoradb/internal/version"
+	"github.com/vectoradb/vectoradb/web"
 )
 
 // background services managed by `start`/`stop` (name -> subcommand + flags).
@@ -126,11 +127,16 @@ func main() {
 			must(daemon.Start(name, args))
 		}
 		fmt.Println("\nVectoraDB is up (background):")
+		if web.FS() != nil {
+			fmt.Println("  web UI       http://localhost:8080")
+		}
 		fmt.Println("  control API  http://localhost:8080/api/status")
 		fmt.Println("  agent API    http://localhost:8088   (POST /agents/{id}/branch)")
 		fmt.Println("  gateway(SQL) postgres://vectoradb:vectoradb@localhost:6432/<branch>")
 		fmt.Println("  storage      http://localhost:9001   (minioadmin/minioadmin)")
-		fmt.Println("\nWeb UI is a separate app — run it with:  make web-dev   (http://localhost:5173)")
+		if web.FS() == nil {
+			fmt.Println("\nThe web UI isn't embedded in this build — run it with:  make web-dev   (http://localhost:5173)")
+		}
 		fmt.Println("Stop everything with: vdb stop")
 	case "stop":
 		for name := range services {

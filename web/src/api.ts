@@ -1,6 +1,9 @@
 // Typed client for the VectoraDB control-plane API (cookie/session auth).
-export const API = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8080'
-export const AGENT_API = (import.meta.env.VITE_AGENT_API_URL as string) || 'http://localhost:8088'
+// When the UI is served by the control-plane itself (the embedded production
+// build sets VITE_API_URL=""), API is "" — i.e. same-origin, relative requests.
+// The dev server (`make web-dev`, VITE_API_URL unset) falls back to :8080.
+export const API = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8080'
+export const AGENT_API = (import.meta.env.VITE_AGENT_API_URL as string | undefined) ?? 'http://localhost:8088'
 
 export type User = { id: number; email: string }
 export type HAState = { enabled: boolean; standby: string; streaming: boolean; primary: string }

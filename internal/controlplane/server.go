@@ -8,9 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
 	"github.com/vectoradb/vectoradb/internal/daemon"
+	"github.com/vectoradb/vectoradb/web"
 )
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
@@ -40,6 +43,13 @@ func Serve(addr string) error {
 	registerPipelines(api, store) // /api/pipelines* (ETL)
 	store.MountKeys(api)          // /api/keys (protected via Authn below)
 	mux.Handle("/api/", store.Authn(api))
+
+	// Serve the web UI from the same origin when it's embedded in the binary
+	// (release builds, -tags embedui), so `vdb start` serves everything.
+	if ui := web.FS(); ui != nil {
+		serveUI(mux, ui)
+		log.Printf("web UI served at http://localhost%s/", addr)
+	}
 
 	log.Printf("control-plane API on %s (auth on; UI origin %s)", addr, store.WebOrigin())
 	return http.ListenAndServe(addr, cors(store.WebOrigin())(logging(mux)))
@@ -533,6 +543,29 @@ func pipelineBranch(p auth.Pipeline) string {
 		name = strings.Trim(name[:40], "-")
 	}
 	return name
+}
+
+// serveUI serves the embedded single-page app on "/" (more specific /api/ and
+// /auth/ patterns take precedence). Real assets are served from the build; any
+// other path falls back to index.html so client-side routes work on refresh.
+func serveUI(mux *http.ServeMux, ui fs.FS) {
+	fsrv := http.FileServer(http.FS(ui))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		if p != "" {
+			if _, err := fs.Stat(ui, p); err == nil {
+				fsrv.ServeHTTP(w, r) // a real asset (JS/CSS/favicon/…)
+				return
+			}
+		}
+		b, err := fs.ReadFile(ui, "index.html")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(b)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
