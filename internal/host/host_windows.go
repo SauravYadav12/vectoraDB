@@ -354,9 +354,25 @@ done <<CANDS
 $cands
 CANDS
 
-# Bindings carrying our path but a dead inode belong to an unregistered distro.
+# Bindings carrying our path but a different inode belong to a distro that was
+# unregistered while its pool was attached. The kernel keeps them for the life of
+# the VM, and every distro shares that VM.
 for d in $stale; do
 	losetup -d "$d" 2>/dev/null || true
+done
+
+# A corpse we could not detach is still holding an old pool. Continuing past it
+# risks ZFS attaching to a device whose backing file is gone, which faults on
+# first write, suspends the pool and wedges the distro. Only restarting the whole
+# VM clears these — terminating this distro is not enough, because the binding
+# lives in the VM, not the distro.
+for d in $stale; do
+	if losetup -l -O NAME --noheadings 2>/dev/null | grep -qx "$d"; then
+		echo "vectoradb: $d still points at a deleted VectoraDB pool image." >&2
+		echo "vectoradb: this happens after unregistering the distro without restarting WSL." >&2
+		echo "vectoradb: run 'wsl --shutdown', then run 'vdb setup' again." >&2
+		exit 1
+	fi
 done
 
 count="$(printf '%s\n' $devs | grep -c . || true)"
@@ -370,7 +386,7 @@ else
 	# detaching under a live pool is what suspends I/O.
 	if zpool list vectoradb >/dev/null 2>&1; then
 		echo "vectoradb: $IMG is attached to multiple loop devices while the pool is live." >&2
-		echo "vectoradb: refusing to continue; run 'wsl --terminate vectoradb' and retry." >&2
+		echo "vectoradb: refusing to continue; run 'wsl --shutdown' and retry." >&2
 		exit 1
 	fi
 	attached="$(printf '%s\n' "$devs" | head -1)"
@@ -395,7 +411,7 @@ if [ -n "$health" ]; then
 	# and the import, after which the normalisation above runs clean.
 	if [ "$health" = "SUSPENDED" ]; then
 		echo "vectoradb: the ZFS pool is SUSPENDED (it lost its backing device)." >&2
-		echo "vectoradb: run 'wsl --terminate vectoradb' and try again." >&2
+		echo "vectoradb: run 'wsl --shutdown', then run 'vdb setup' again." >&2
 		exit 1
 	fi
 	finish
@@ -444,11 +460,19 @@ WantedBy=multi-user.target
 // ensureZpoolDevice installs and enables the loop-device unit above.
 func ensureZpoolDevice(name string) error {
 	fmt.Println("Preparing the ZFS pool device…")
+	// Masking happens here, not in installZFS, because installZFS short-circuits
+	// once ZFS works — this must also reach distros provisioned by an older
+	// build. zfs-import-scan runs `zpool import -aN -d /dev`, and that wide scan
+	// can import an old pool's label off a stale loop binding left by an
+	// unregistered distro, onto a device whose backing file is gone. Importing
+	// is this unit's job alone, scoped to the device we attached.
 	script := "set -e; mkdir -p /usr/local/lib/vectoradb; " +
 		writeFileB64("/usr/local/lib/vectoradb/zpool-up.sh", zpoolUpScript) + "; " +
 		"chmod 0755 /usr/local/lib/vectoradb/zpool-up.sh; " +
 		writeFileB64("/etc/systemd/system/vectoradb-zpool.service", zpoolUnit) + "; " +
-		"systemctl daemon-reload; systemctl enable --now vectoradb-zpool.service"
+		"systemctl daemon-reload; " +
+		"systemctl mask zfs-import-scan.service zfs-import-cache.service >/dev/null 2>&1 || true; " +
+		"systemctl enable --now vectoradb-zpool.service"
 	if err := wslRoot(name, script); err != nil {
 		return fmt.Errorf("preparing the ZFS pool device: %w", err)
 	}
@@ -558,10 +582,14 @@ func installZFS(name string) error {
 	// daemon-reload is required before enabling: the units arrive with the
 	// tarball, so systemd has not seen them yet.
 	//
-	// Only zfs-mount/zfs.target are enabled here. Importing the pool is left to
-	// vectoradb-zpool.service (see ensureZpoolDevice): zfs-import-cache.service
-	// could never do it, because a loop-backed pool writes no /etc/zfs/zpool.cache
-	// and that unit's ConditionPathExists therefore never holds.
+	// ZFS's own import units are masked, and importing is left entirely to
+	// vectoradb-zpool.service (see ensureZpoolDevice). zfs-import-cache could
+	// never work anyway — a loop-backed pool writes no /etc/zfs/zpool.cache, so
+	// its ConditionPathExists never holds — and zfs-import-scan is actively
+	// harmful here: it runs `zpool import -aN -d /dev`, and a wide scan can find
+	// an old pool's label on a loop binding left behind by an unregistered
+	// distro, importing onto a device whose backing file is gone. That faults on
+	// the first write and suspends the pool, which then wedges the distro.
 	//
 	// --keep-directory-symlink is not optional: the bundle carries a ./lib entry
 	// and /lib is a symlink to /usr/lib on a usrmerged Ubuntu. Without the flag
@@ -570,6 +598,7 @@ func installZFS(name string) error {
 	script := fmt.Sprintf("set -e; %s; tar -C / --keep-directory-symlink -xzf %q; "+
 		"depmod -a %q; ldconfig; modprobe zfs; "+
 		"systemctl daemon-reload; "+
+		"systemctl mask zfs-import-scan.service zfs-import-cache.service >/dev/null 2>&1 || true; "+
 		"systemctl enable --now zfs-mount.service zfs.target",
 		guestPath, winPathToMnt(bundle), rel)
 	if err := wslRoot(name, script); err != nil {

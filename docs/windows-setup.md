@@ -73,10 +73,19 @@ for this WSL kernel" message rather than a module that silently refuses to load.
 
 ```powershell
 wsl --unregister vectoradb                       # remove the distro + its data
+wsl --shutdown                                   # release its loop device
 Remove-Item -Recurse "$env:LOCALAPPDATA\Programs\vectoradb"
+Remove-Item -Recurse "$env:LOCALAPPDATA\vectoradb"
 ```
 
 Nothing else to undo — VectoraDB made no machine-wide WSL changes.
+
+> **The `wsl --shutdown` matters if you plan to reinstall.** Unregistering a
+> distro does not release the loop device its ZFS pool was using: that binding
+> belongs to the WSL virtual machine, which all distros share, and it survives
+> until the VM restarts. A reinstall in the same VM lifetime would otherwise find
+> a device pointing at the deleted pool image. `vdb setup` detects this and stops
+> with instructions rather than proceeding, but a `wsl --shutdown` avoids it.
 
 ## Building the ZFS bundle (maintainers)
 
