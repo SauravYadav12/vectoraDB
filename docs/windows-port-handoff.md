@@ -82,7 +82,17 @@ publishes the live device as the stable symlink `/dev/vectoradb-pool`.
 
 **Never detach a loop device that a pool is using.** It suspends pool I/O, and a
 suspended pool can wedge the whole WSL VM — `wsl --shutdown` then hangs and only
-`Restart-Service WSLService` (elevated) or a reboot clears it.
+`Restart-Service WSLService` (elevated) or a reboot clears it. `zpool-up.sh`
+therefore refuses to continue when it finds the pool `SUSPENDED`, telling the
+user to terminate the distro: a fresh boot drops every binding and import, after
+which normalisation runs clean.
+
+**Import from our device, never a scan of `/dev`.** `zpool import -d /dev` reads
+every device, including a stale binding left by an unregistered distro, and the
+old pool's label is still on it. ZFS then imports onto a device whose backing
+file no longer exists, which faults on the first write and suspends the pool.
+The import is scoped to `/dev/vectoradb-pool`. This one is subtle and cost
+several debugging cycles — do not widen it back to `-d /dev`.
 
 **WSL leaves `/` mount propagation private.** A normal systemd boot makes it
 `rshared`. Sandboxed systemd services (`ProtectSystem=strict`, e.g.

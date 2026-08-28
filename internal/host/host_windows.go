@@ -388,11 +388,25 @@ fi
 # be a name that survives the loop number changing between boots.
 ln -sfn "$attached" "$DEV"
 
-if zpool list vectoradb >/dev/null 2>&1; then
+health="$(zpool list -H -o health vectoradb 2>/dev/null || true)"
+if [ -n "$health" ]; then
+	# A SUSPENDED pool lost its backing device and cannot be repaired in place;
+	# limping on just wedges the distro. A fresh boot drops every loop binding
+	# and the import, after which the normalisation above runs clean.
+	if [ "$health" = "SUSPENDED" ]; then
+		echo "vectoradb: the ZFS pool is SUSPENDED (it lost its backing device)." >&2
+		echo "vectoradb: run 'wsl --terminate vectoradb' and try again." >&2
+		exit 1
+	fi
 	finish
 	exit 0
 fi
-if zpool import -d /dev vectoradb >/dev/null 2>&1; then
+
+# Import from our device alone, never a scan of /dev. A scan can find the label
+# of an older pool on a stale binding left by an unregistered distro and import
+# onto a device whose backing file is gone — which faults on the first write and
+# suspends the pool.
+if zpool import -d "$DEV" vectoradb >/dev/null 2>&1; then
 	finish
 	exit 0
 fi
