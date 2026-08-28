@@ -32,7 +32,8 @@ const (
 	// network so they can reach both the source and the target instance.
 	// pgloaderImage is built locally on first use — Debian packages pgloader for
 	// both amd64 and arm64, unlike the amd64-only Docker Hub image.
-	pgloaderImage = "vectoradb/pgloader:local" // MySQL/MariaDB → Postgres
+	pgloaderImage = "vectoradb/pgloader:local" // MariaDB / MySQL ≤5.7 → Postgres
+	mysqlImage    = "mysql:8"                  // client + mysqldump; speaks the MySQL 8.x protocol pgloader can't
 	mongoImage    = "mongo:7"                  // ships mongosh for enumerating/exporting collections
 	pgUser        = "vectoradb"
 	pgPassword    = "vectoradb"

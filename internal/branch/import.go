@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -257,22 +258,34 @@ func loadPostgres(target, dsn string) error {
 // mapping), run as a throwaway container on the shared network so it can reach
 // both the source and the target branch's Postgres.
 func loadMySQL(target, dsn string) error {
+	// pgloader can't read MySQL 8.x (its caching_sha2_password handshake and its
+	// information_schema layout), so route those to a mysqldump-based path whose
+	// client speaks the modern protocol. MariaDB and MySQL ≤5.7 stay on pgloader,
+	// which maps their indexes/constraints more richly.
+	if mysqlNeedsNative(dsn) {
+		return loadMySQLNative(target, dsn)
+	}
 	if err := ensurePgloaderImage(); err != nil {
 		return fmt.Errorf("prepare pgloader: %w", err)
 	}
 	dsn = strings.Replace(dsn, "mariadb://", "mysql://", 1)
 	pgTarget := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", pgUser, pgPassword, container(target), pgDatabase)
 	fmt.Println("  running pgloader (schema + data + type mapping)…")
-	// pgloader logs a fatal connection error but still exits 0, so inspect its
-	// output rather than trusting the exit code alone.
+	// pgloader exits 0 even when it fails outright (a bad connection) or silently
+	// loads nothing (e.g. it can't read a MySQL 8.0 source's metadata), so the exit
+	// code can't be trusted. Show the operator its log, then treat "no tables
+	// landed" as the real success signal.
 	out, err := exec.Command("sudo", "docker", "run", "--rm", "--network", network,
 		pgloaderImage, "pgloader", dsn, pgTarget).CombinedOutput()
 	fmt.Print(string(out))
 	if err != nil {
 		return fmt.Errorf("pgloader: %w", err)
 	}
-	if strings.Contains(string(out), "Failed to connect") || strings.Contains(string(out), "UNSUPPORTED-AUTHENTICATION") {
-		return fmt.Errorf("pgloader could not read the source (see log above); for MySQL 8, connect as a user with mysql_native_password authentication")
+	if TableCount(target) == 0 {
+		if strings.Contains(string(out), "Failed to connect") || strings.Contains(string(out), "UNSUPPORTED-AUTHENTICATION") {
+			return fmt.Errorf("pgloader could not authenticate to the source (see log above); MySQL 8 needs the server started with mysql_native_password — its default caching_sha2_password handshake is unsupported")
+		}
+		return fmt.Errorf("pgloader loaded no tables (see log above); the source may be empty or unreadable — or export it to a .sql/.csv/.json file and run `vdb import` on that")
 	}
 	return nil
 }
@@ -291,6 +304,244 @@ func ensurePgloaderImage() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// --- MySQL 8.x native path (mysqldump; the client speaks caching_sha2_password) ---
+
+type myDSN struct{ host, port, user, pass, db string }
+
+func parseMyDSN(dsn string) myDSN {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return myDSN{}
+	}
+	c := myDSN{host: u.Hostname(), port: u.Port(), db: strings.TrimPrefix(u.Path, "/")}
+	if c.port == "" {
+		c.port = "3306"
+	}
+	if u.User != nil {
+		c.user = u.User.Username()
+		c.pass, _ = u.User.Password()
+	}
+	return c
+}
+
+// myArgs builds a `docker run … mysql:8 <tool> -h… -u…` argument list.
+func myArgs(c myDSN, tool string, extra ...string) []string {
+	a := []string{"docker", "run", "--rm", "--network", network, mysqlImage, tool,
+		"-h", c.host, "-P", c.port, "-u", c.user}
+	if c.pass != "" {
+		a = append(a, "-p"+c.pass)
+	}
+	return append(a, extra...)
+}
+
+// mysqlNeedsNative reports whether a source needs the mysqldump path: true only
+// for MySQL ≥8. MariaDB and MySQL ≤5.7 (and an unreachable probe) return false so
+// pgloader handles them. stdout carries only the version; warnings go to stderr.
+func mysqlNeedsNative(dsn string) bool {
+	c := parseMyDSN(dsn)
+	if c.host == "" {
+		return false
+	}
+	out, err := exec.Command("sudo", myArgs(c, "mysql", "-N", "-B", "-e", "SELECT VERSION()")...).Output()
+	if err != nil {
+		return false
+	}
+	v := strings.ToLower(strings.TrimSpace(string(out)))
+	if v == "" || strings.Contains(v, "mariadb") {
+		return false
+	}
+	maj := 0
+	for _, ch := range v {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		maj = maj*10 + int(ch-'0')
+	}
+	return maj >= 8
+}
+
+// loadMySQLNative imports a MySQL 8.x source: it reads the schema from
+// information_schema (reliable across versions) and streams data via mysqldump,
+// translating MySQL's dialect/escaping for Postgres.
+func loadMySQLNative(target, dsn string) error {
+	c := parseMyDSN(dsn)
+	if c.db == "" {
+		return fmt.Errorf("the MySQL connection string must include a database name (…/dbname)")
+	}
+	fmt.Println("  MySQL 8.x source — importing via mysqldump (pgloader can't read this version)…")
+	tables, err := mysqlTables(c)
+	if err != nil {
+		return err
+	}
+	if len(tables) == 0 {
+		return fmt.Errorf("no tables found in database %q", c.db)
+	}
+	fmt.Printf("  %d table(s): %s\n", len(tables), strings.Join(tables, ", "))
+
+	// 1. Schema — build CREATE TABLE from information_schema.
+	var ddl strings.Builder
+	for _, t := range tables {
+		stmt, err := mysqlCreateTable(c, t)
+		if err != nil {
+			return fmt.Errorf("read schema of %q: %w", t, err)
+		}
+		ddl.WriteString(stmt)
+	}
+	if err := pipeInto(target, strings.NewReader(ddl.String()),
+		"psql", "-q", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1"); err != nil {
+		return fmt.Errorf("create tables: %w", err)
+	}
+
+	// 2. Data — mysqldump (ANSI: double-quoted identifiers, one row per INSERT),
+	// loaded with MySQL-style backslash escaping enabled for the session.
+	fmt.Println("  copying rows…")
+	data, err := mysqldumpData(c)
+	if err != nil {
+		return err
+	}
+	preamble := "SET client_encoding='UTF8';\nSET standard_conforming_strings=off;\nSET backslash_quote=on;\nSET client_min_messages=warning;\n"
+	if err := pipeInto(target, strings.NewReader(preamble+data),
+		"psql", "-q", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1"); err != nil {
+		return fmt.Errorf("load rows: %w", err)
+	}
+	return nil
+}
+
+func mysqlTables(c myDSN) ([]string, error) {
+	q := fmt.Sprintf("SELECT table_name FROM information_schema.tables WHERE table_schema=%s AND table_type='BASE TABLE' ORDER BY table_name", sqlQuote(c.db))
+	out, err := exec.Command("sudo", myArgs(c, "mysql", "-N", "-B", "-e", q)...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("could not reach the MySQL source: %w", err)
+	}
+	var t []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			t = append(t, s)
+		}
+	}
+	return t, nil
+}
+
+// mysqlCreateTable renders a Postgres CREATE TABLE for one source table. mysqldump
+// emits full-row INSERTs (no column list), so column order here must match the
+// source's ordinal_position — and generated columns are skipped in both places.
+func mysqlCreateTable(c myDSN, table string) (string, error) {
+	q := fmt.Sprintf(`SELECT column_name, data_type, column_type, is_nullable, column_key, extra `+
+		`FROM information_schema.columns WHERE table_schema=%s AND table_name=%s ORDER BY ordinal_position`,
+		sqlQuote(c.db), sqlQuote(table))
+	out, err := exec.Command("sudo", myArgs(c, "mysql", "-N", "-B", "-e", q)...).Output()
+	if err != nil {
+		return "", err
+	}
+	var defs, pk []string
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, "\t")
+		if len(f) < 6 {
+			continue
+		}
+		name, dtype, ctype := f[0], strings.ToLower(f[1]), strings.ToLower(f[2])
+		nullable, key, extra := f[3], f[4], strings.ToUpper(f[5])
+		// Skip only true generated columns (VIRTUAL/STORED), which mysqldump omits
+		// from INSERTs — NOT "DEFAULT_GENERATED", which just marks a column default.
+		if strings.Contains(extra, "VIRTUAL GENERATED") || strings.Contains(extra, "STORED GENERATED") {
+			continue
+		}
+		def := pgIdent(name) + " " + mapMySQLType(dtype, ctype)
+		if nullable == "NO" {
+			def += " NOT NULL"
+		}
+		defs = append(defs, def)
+		if key == "PRI" {
+			pk = append(pk, pgIdent(name))
+		}
+	}
+	if len(defs) == 0 {
+		return "", fmt.Errorf("no columns")
+	}
+	body := strings.Join(defs, ", ")
+	if len(pk) > 0 {
+		body += ", PRIMARY KEY (" + strings.Join(pk, ", ") + ")"
+	}
+	return fmt.Sprintf("CREATE TABLE %s (%s);\n", pgIdent(table), body), nil
+}
+
+// mapMySQLType maps a MySQL column type to a Postgres type. It preserves numeric
+// precision and widens for unsigned ranges; text/binary/enum and anything unknown
+// fall back to text so a data migration never fails on a length or type mismatch.
+func mapMySQLType(dataType, columnType string) string {
+	unsigned := strings.Contains(columnType, "unsigned")
+	switch dataType {
+	case "tinyint":
+		return "smallint"
+	case "smallint":
+		if unsigned {
+			return "integer"
+		}
+		return "smallint"
+	case "mediumint", "year":
+		return "integer"
+	case "int", "integer":
+		if unsigned {
+			return "bigint"
+		}
+		return "integer"
+	case "bigint":
+		if unsigned {
+			return "numeric"
+		}
+		return "bigint"
+	case "decimal", "numeric":
+		if i := strings.Index(columnType, "("); i >= 0 {
+			return "numeric" + columnType[i:strings.Index(columnType, ")")+1]
+		}
+		return "numeric"
+	case "float":
+		return "real"
+	case "double", "real":
+		return "double precision"
+	case "bit":
+		return "smallint"
+	case "date":
+		return "date"
+	case "datetime", "timestamp":
+		return "timestamp"
+	case "time":
+		return "time"
+	case "json":
+		return "jsonb"
+	default: // char/varchar/text/enum/set/blob/binary/… → text
+		return "text"
+	}
+}
+
+// mysqldumpData returns the source's data as one INSERT statement per row, with
+// ANSI-quoted identifiers and MySQL-style value escaping. Non-INSERT lines
+// (LOCK/UNLOCK/SET/comments) are dropped; each INSERT is a single physical line.
+func mysqldumpData(c myDSN) (string, error) {
+	args := []string{"docker", "run", "--rm", "--network", network, mysqlImage, "mysqldump",
+		"-h", c.host, "-P", c.port, "-u", c.user}
+	if c.pass != "" {
+		args = append(args, "-p"+c.pass)
+	}
+	args = append(args, "--no-create-info", "--compatible=ansi", "--skip-extended-insert",
+		"--no-tablespaces", "--skip-comments", "--skip-set-charset", "--default-character-set=utf8mb4", c.db)
+	out, err := exec.Command("sudo", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("mysqldump failed: %w", err)
+	}
+	var b strings.Builder
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "INSERT INTO ") {
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), nil
 }
 
 // loadMongo migrates every collection in a MongoDB source into its own JSONB
@@ -474,6 +725,10 @@ func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''
 
 // sqlQuote renders s as a single-quoted SQL string literal.
 func sqlQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+
+// pgIdent renders s as a double-quoted SQL identifier (matching mysqldump's ANSI
+// quoting so the generated schema and the dumped INSERTs agree on names).
+func pgIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 func sanitizeIdent(s string) string {
 	var b strings.Builder

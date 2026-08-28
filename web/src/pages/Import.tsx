@@ -53,7 +53,7 @@ export default function Import() {
           />
           <span className="hint">
             Postgres/Postgres-wire (RDS, Neon, Supabase, CockroachDB) with full fidelity;
-            MySQL/MariaDB via <code>pgloader</code>; MongoDB collections → JSONB tables.
+            MySQL (incl. 8.x) &amp; MariaDB; MongoDB collections → JSONB tables.
           </span>
         </label>
         {isPg && (
