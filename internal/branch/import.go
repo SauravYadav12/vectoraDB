@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -37,19 +38,47 @@ const (
 	srcJSON
 )
 
+// Progress is a sink for migration progress: a human-readable log stream plus an
+// optional item-level step callback (e.g. MongoDB collections done/total). Both
+// are nil-safe, so callers that don't care can pass a bare &Progress{} or nil.
+type Progress struct {
+	Log  io.Writer
+	Step func(done, total int, label string)
+}
+
+func stdoutProgress() *Progress { return &Progress{Log: os.Stdout} }
+
+func (p *Progress) Logf(format string, a ...any) {
+	if p != nil && p.Log != nil {
+		fmt.Fprintf(p.Log, format, a...)
+	}
+}
+
+func (p *Progress) step(done, total int, label string) {
+	if p != nil && p.Step != nil {
+		p.Step(done, total, label)
+	}
+}
+
 // Import loads a Postgres source (postgres://…) or a local file (.sql/.csv/.json)
-// into a new instance named target, returning the resolved instance name.
+// into a new instance named target, returning the resolved instance name. Output
+// goes to stdout; use ImportTo to stream progress elsewhere (e.g. the web console).
 func Import(source, target string) (string, error) {
+	return ImportTo(stdoutProgress(), source, target)
+}
+
+// ImportTo is Import with an explicit progress sink.
+func ImportTo(p *Progress, source, target string) (string, error) {
 	switch {
 	case isPostgresDSN(source):
-		return importInstance(target, defaultTargetName(source), "PostgreSQL source (pg_dump)",
-			func(t string) error { return loadPostgres(t, source) })
+		return importInstance(p, target, defaultTargetName(source), "PostgreSQL source (pg_dump)",
+			func(t string) error { return loadPostgres(p, t, source) })
 	case hasScheme(source, "mysql", "mariadb"):
-		return importInstance(target, defaultTargetName(source), "MySQL/MariaDB source (pgloader)",
-			func(t string) error { return loadMySQL(t, source) })
+		return importInstance(p, target, defaultTargetName(source), "MySQL/MariaDB source (pgloader)",
+			func(t string) error { return loadMySQL(p, t, source) })
 	case hasScheme(source, "mongodb", "mongodb+srv"):
-		return importInstance(target, defaultTargetName(source), "MongoDB source (collections → JSONB)",
-			func(t string) error { return loadMongo(t, source) })
+		return importInstance(p, target, defaultTargetName(source), "MongoDB source (collections → JSONB)",
+			func(t string) error { return loadMongo(p, t, source) })
 	}
 	info, err := os.Stat(source)
 	if err != nil || info.IsDir() {
@@ -64,22 +93,31 @@ func Import(source, target string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	return ImportReader(f, kind, filepath.Base(source), target)
+	return ImportReaderTo(p, f, kind, filepath.Base(source), target)
 }
 
 // ImportReader loads a stream (a .sql/.csv/.json file's contents, from stdin or a
 // browser upload) into a new instance. srcname names the origin, used for the
 // default instance name and the target table for CSV/JSON.
 func ImportReader(r io.Reader, kind sourceKind, srcname, target string) (string, error) {
-	base := sanitizeIdent(strings.TrimSuffix(srcname, filepath.Ext(srcname)))
-	return importInstance(target, "import-"+base, describeKind(kind, srcname), func(t string) error {
+	return ImportReaderTo(stdoutProgress(), r, kind, srcname, target)
+}
+
+// ImportReaderTo is ImportReader with an explicit progress sink.
+func ImportReaderTo(p *Progress, r io.Reader, kind sourceKind, srcname, target string) (string, error) {
+	stem := strings.TrimSuffix(srcname, filepath.Ext(srcname))
+	// The TABLE keeps the source name verbatim (schema fidelity); the instance name
+	// must be filesystem/docker-safe, so it stays sanitized.
+	table := stem
+	instance := "import-" + sanitizeIdent(stem)
+	return importInstance(p, target, instance, describeKind(kind, srcname), func(t string) error {
 		switch kind {
 		case srcSQL:
-			return loadSQL(t, r)
+			return loadSQL(p, t, r)
 		case srcCSV:
-			return loadCSV(t, r, base)
+			return loadCSV(p, t, r, table)
 		case srcJSON:
-			return loadJSON(t, r, base)
+			return loadJSON(p, t, r, table)
 		}
 		return fmt.Errorf("unsupported source kind")
 	})
@@ -87,11 +125,11 @@ func ImportReader(r io.Reader, kind sourceKind, srcname, target string) (string,
 
 // importInstance creates the target instance, gives it a clean public schema,
 // runs the loader, and prints a summary.
-func importInstance(target, defName, desc string, load func(string) error) (string, error) {
+func importInstance(p *Progress, target, defName, desc string, load func(string) error) (string, error) {
 	if target == "" {
 		target = defName
 	}
-	fmt.Printf("Creating instance %q…\n", target)
+	p.Logf("Creating instance %q…\n", target)
 	if err := Create(target, "main"); err != nil {
 		return "", fmt.Errorf("create target instance %q: %w", target, err)
 	}
@@ -103,7 +141,7 @@ func importInstance(target, defName, desc string, load func(string) error) (stri
 	if err := prepareTarget(target); err != nil {
 		return target, fmt.Errorf("prepare target: %w", err)
 	}
-	fmt.Printf("Importing %s → %q…\n", desc, target)
+	p.Logf("Importing %s → %q…\n", desc, target)
 	if err := load(target); err != nil {
 		return target, fmt.Errorf("import failed: %w", err)
 	}
@@ -114,9 +152,9 @@ func importInstance(target, defName, desc string, load func(string) error) (stri
 	if n == 0 {
 		return target, fmt.Errorf("no tables were imported into %q — the source is empty or the wrong database was named (check the connection string or file)", target)
 	}
-	fmt.Printf("\n✓ Imported into instance %q — %d table(s) now present.\n", target, n)
-	fmt.Printf("  Connect: postgres://vectoradb:<API_KEY>@localhost:6432/%s\n", target)
-	fmt.Printf("  Browse:  the web console (Console / Ledger), branch = %q\n", target)
+	p.Logf("\n✓ Imported into instance %q — %d table(s) now present.\n", target, n)
+	p.Logf("  Connect: postgres://vectoradb:<API_KEY>@localhost:6432/%s\n", target)
+	p.Logf("  Browse:  the web console (Console / Ledger), branch = %q\n", target)
 	return target, nil
 }
 
@@ -126,13 +164,18 @@ func importInstance(target, defName, desc string, load func(string) error) (stri
 // (wal_level=logical), and the connecting role must be replication-capable and own
 // (or be able to read) the tables.
 func ImportContinuous(source, target string) (string, error) {
+	return ImportContinuousTo(stdoutProgress(), source, target)
+}
+
+// ImportContinuousTo is ImportContinuous with an explicit progress sink.
+func ImportContinuousTo(p *Progress, source, target string) (string, error) {
 	if !isPostgresDSN(source) {
 		return "", fmt.Errorf("--continuous requires a postgres:// source (logical replication)")
 	}
 	if target == "" {
 		target = defaultTargetName(source)
 	}
-	fmt.Printf("Creating instance %q…\n", target)
+	p.Logf("Creating instance %q…\n", target)
 	if err := Create(target, "main"); err != nil {
 		return "", fmt.Errorf("create target instance %q: %w", target, err)
 	}
@@ -145,7 +188,7 @@ func ImportContinuous(source, target string) (string, error) {
 	// not DDL, so the subscriber needs the tables to exist before it can populate
 	// them. --no-publications/--no-subscriptions keep the source's own replication
 	// objects out of the target.
-	fmt.Println("Copying schema (structure only)…")
+	p.Logf("Copying schema (structure only)…\n")
 	schemaScript := fmt.Sprintf("set -euo pipefail; pg_dump %s --schema-only --no-owner --no-acl --no-comments "+
 		"--no-publications --no-subscriptions | psql -q -U %s -d %s", shellQuote(source), pgUser, pgDatabase)
 	if err := run("docker", "exec", "-e", pgImportOptions, container(target), "bash", "-c", schemaScript); err != nil {
@@ -159,21 +202,21 @@ func ImportContinuous(source, target string) (string, error) {
 	// Best-effort: create a publication covering all tables on the source. If the
 	// role lacks privilege or a publication named vdb_pub already exists, continue —
 	// the subscription below surfaces any real problem.
-	fmt.Println("Ensuring a publication on the source…")
+	p.Logf("Ensuring a publication on the source…\n")
 	_ = run("docker", "exec", container(target), "psql", source, "-v", "ON_ERROR_STOP=0",
 		"-c", "CREATE PUBLICATION vdb_pub FOR ALL TABLES;")
 	// Subscribe on the target: initial copy + streaming changes.
-	fmt.Println("Creating subscription (initial copy, then streaming)…")
+	p.Logf("Creating subscription (initial copy, then streaming)…\n")
 	sub := fmt.Sprintf("CREATE SUBSCRIPTION vdb_sub CONNECTION %s PUBLICATION vdb_pub;", sqlQuote(source))
 	if err := run("docker", "exec", "-e", pgImportOptions, container(target),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1", "-c", sub); err != nil {
 		return target, fmt.Errorf("could not start replication — the source must allow logical replication "+
 			"(wal_level=logical), expose a replication-capable role, and be reachable from VectoraDB: %w", err)
 	}
-	fmt.Printf("\n✓ Continuous replication active into %q.\n", target)
-	fmt.Println("  The initial copy runs now; subsequent changes stream continuously.")
-	fmt.Println("  Progress:  SELECT * FROM pg_stat_subscription;")
-	fmt.Printf("  Cut over once caught up:  vdb import-cutover %s\n", target)
+	p.Logf("\n✓ Continuous replication active into %q.\n", target)
+	p.Logf("  The initial copy runs now; subsequent changes stream continuously.\n")
+	p.Logf("  Progress:  SELECT * FROM pg_stat_subscription;\n")
+	p.Logf("  Cut over once caught up:  vdb import-cutover %s\n", target)
 	return target, nil
 }
 
@@ -265,7 +308,8 @@ func prepareTarget(target string) error {
 		"DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;")
 }
 
-func loadPostgres(target, dsn string) error {
+func loadPostgres(p *Progress, target, dsn string) error {
+	p.Logf("  running pg_dump | psql (schema + data)…\n")
 	script := fmt.Sprintf("set -euo pipefail; pg_dump %s --no-owner --no-acl --no-comments | psql -q -U %s -d %s",
 		shellQuote(dsn), pgUser, pgDatabase)
 	return run("docker", "exec", "-e", pgImportOptions, container(target), "bash", "-c", script)
@@ -274,27 +318,27 @@ func loadPostgres(target, dsn string) error {
 // loadMySQL migrates a MySQL/MariaDB source using pgloader (schema + data + type
 // mapping), run as a throwaway container on the shared network so it can reach
 // both the source and the target branch's Postgres.
-func loadMySQL(target, dsn string) error {
+func loadMySQL(p *Progress, target, dsn string) error {
 	// pgloader can't read MySQL 8.x (its caching_sha2_password handshake and its
 	// information_schema layout), so route those to a mysqldump-based path whose
 	// client speaks the modern protocol. MariaDB and MySQL ≤5.7 stay on pgloader,
 	// which maps their indexes/constraints more richly.
 	if mysqlNeedsNative(dsn) {
-		return loadMySQLNative(target, dsn)
+		return loadMySQLNative(p, target, dsn)
 	}
-	if err := ensurePgloaderImage(); err != nil {
+	if err := ensurePgloaderImage(p); err != nil {
 		return fmt.Errorf("prepare pgloader: %w", err)
 	}
 	dsn = strings.Replace(dsn, "mariadb://", "mysql://", 1)
 	pgTarget := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", pgUser, pgPassword, container(target), pgDatabase)
-	fmt.Println("  running pgloader (schema + data + type mapping)…")
+	p.Logf("  running pgloader (schema + data + type mapping)…\n")
 	// pgloader exits 0 even when it fails outright (a bad connection) or silently
 	// loads nothing (e.g. it can't read a MySQL 8.0 source's metadata), so the exit
 	// code can't be trusted. Show the operator its log, then treat "no tables
 	// landed" as the real success signal.
 	out, err := exec.Command("sudo", "docker", "run", "--rm", "--network", network,
 		pgloaderImage, "pgloader", dsn, pgTarget).CombinedOutput()
-	fmt.Print(string(out))
+	p.Logf("%s", string(out))
 	if err != nil {
 		return fmt.Errorf("pgloader: %w", err)
 	}
@@ -309,11 +353,11 @@ func loadMySQL(target, dsn string) error {
 
 // ensurePgloaderImage builds the local, arch-native pgloader image if it is not
 // already present. Idempotent; the build runs only on the first migration.
-func ensurePgloaderImage() error {
+func ensurePgloaderImage(p *Progress) error {
 	if exec.Command("sudo", "docker", "image", "inspect", pgloaderImage).Run() == nil {
 		return nil
 	}
-	fmt.Println("  building the pgloader image (first run only)…")
+	p.Logf("  building the pgloader image (first run only)…\n")
 	dockerfile := "FROM debian:stable-slim\n" +
 		"RUN apt-get update && apt-get install -y --no-install-recommends pgloader ca-certificates && rm -rf /var/lib/apt/lists/*\n"
 	cmd := exec.Command("sudo", "docker", "build", "-t", pgloaderImage, "-")
@@ -382,12 +426,12 @@ func mysqlNeedsNative(dsn string) bool {
 // loadMySQLNative imports a MySQL 8.x source: it reads the schema from
 // information_schema (reliable across versions) and streams data via mysqldump,
 // translating MySQL's dialect/escaping for Postgres.
-func loadMySQLNative(target, dsn string) error {
+func loadMySQLNative(p *Progress, target, dsn string) error {
 	c := parseMyDSN(dsn)
 	if c.db == "" {
 		return fmt.Errorf("the MySQL connection string must include a database name (…/dbname)")
 	}
-	fmt.Println("  MySQL 8.x source — importing via mysqldump (pgloader can't read this version)…")
+	p.Logf("  MySQL 8.x source — importing via mysqldump (pgloader can't read this version)…\n")
 	tables, err := mysqlTables(c)
 	if err != nil {
 		return err
@@ -395,11 +439,13 @@ func loadMySQLNative(target, dsn string) error {
 	if len(tables) == 0 {
 		return fmt.Errorf("no tables found in database %q", c.db)
 	}
-	fmt.Printf("  %d table(s): %s\n", len(tables), strings.Join(tables, ", "))
+	p.Logf("  %d table(s): %s\n", len(tables), strings.Join(tables, ", "))
 
 	// 1. Schema — build CREATE TABLE from information_schema.
 	var ddl strings.Builder
-	for _, t := range tables {
+	for i, t := range tables {
+		p.Logf("  table %q…\n", t)
+		p.step(i+1, len(tables), "table "+t)
 		stmt, err := mysqlCreateTable(c, t)
 		if err != nil {
 			return fmt.Errorf("read schema of %q: %w", t, err)
@@ -413,7 +459,7 @@ func loadMySQLNative(target, dsn string) error {
 
 	// 2. Data — mysqldump (ANSI: double-quoted identifiers, one row per INSERT),
 	// loaded with MySQL-style backslash escaping enabled for the session.
-	fmt.Println("  copying rows…")
+	p.Logf("  copying rows…\n")
 	data, err := mysqldumpData(c)
 	if err != nil {
 		return err
@@ -563,7 +609,7 @@ func mysqldumpData(c myDSN) (string, error) {
 
 // loadMongo migrates every collection in a MongoDB source into its own JSONB
 // table, using the mongo image's shell to enumerate and export documents.
-func loadMongo(target, uri string) error {
+func loadMongo(p *Progress, target, uri string) error {
 	cols, err := mongoCollections(uri)
 	if err != nil {
 		return err
@@ -571,10 +617,11 @@ func loadMongo(target, uri string) error {
 	if len(cols) == 0 {
 		return fmt.Errorf("no collections found at the source")
 	}
-	fmt.Printf("  %d collection(s): %s\n", len(cols), strings.Join(cols, ", "))
-	for _, c := range cols {
-		fmt.Printf("  collection %q → table %q…\n", c, sanitizeIdent(c))
-		if err := mongoImportCollection(target, uri, c); err != nil {
+	p.Logf("  %d collection(s): %s\n", len(cols), strings.Join(cols, ", "))
+	for i, c := range cols {
+		p.Logf("  collection %q → table %q (name preserved)…\n", c, c)
+		p.step(i+1, len(cols), "collection "+c)
+		if err := mongoImportCollection(p, target, uri, c); err != nil {
 			return fmt.Errorf("collection %q: %w", c, err)
 		}
 	}
@@ -596,9 +643,18 @@ func mongoCollections(uri string) ([]string, error) {
 	return cols, nil
 }
 
-func mongoImportCollection(target, uri, coll string) error {
-	// Stream each document as one JSON line (extended JSON) into the JSON loader.
-	script := fmt.Sprintf("db.getCollection(%s).find().forEach(d=>print(EJSON.stringify(d)))", jsStr(coll))
+// mongoCleanJS is a mongosh helper that renders a document as PLAIN JSON —
+// ObjectId → hex string, Date → ISO string, other BSON types → their string —
+// recursively, so no Extended-JSON `$oid`/`$date` wrappers leak into the data
+// (top-level or nested).
+const mongoCleanJS = `function clean(v){if(v==null)return v;if(v instanceof Date)return v.toISOString();` +
+	`if(typeof v!=='object')return v;if(v._bsontype)return v.toString();` +
+	`if(Array.isArray(v))return v.map(clean);var o={};for(var k in v)o[k]=clean(v[k]);return o;}`
+
+func mongoImportCollection(p *Progress, target, uri, coll string) error {
+	// Stream each document as one plain-JSON line into the JSON loader.
+	script := fmt.Sprintf("%s db.getCollection(%s).find().forEach(function(d){print(JSON.stringify(clean(d)))})",
+		mongoCleanJS, jsStr(coll))
 	cmd := exec.Command("sudo", "docker", "run", "--rm", "--network", network, mongoImage,
 		"mongosh", uri, "--quiet", "--eval", script)
 	stdout, err := cmd.StdoutPipe()
@@ -609,7 +665,7 @@ func mongoImportCollection(target, uri, coll string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	if err := loadJSON(target, stdout, sanitizeIdent(coll)); err != nil {
+	if err := loadJSON(p, target, stdout, coll); err != nil { // preserve the collection name verbatim
 		_ = cmd.Wait()
 		return err
 	}
@@ -637,11 +693,12 @@ func hasScheme(s string, schemes ...string) bool {
 
 func jsStr(s string) string { b, _ := json.Marshal(s); return string(b) }
 
-func loadSQL(target string, r io.Reader) error {
+func loadSQL(p *Progress, target string, r io.Reader) error {
+	p.Logf("  running the .sql dump through psql…\n")
 	return pipeInto(target, r, "psql", "-q", "-U", pgUser, "-d", pgDatabase)
 }
 
-func loadCSV(target string, r io.Reader, table string) error {
+func loadCSV(p *Progress, target string, r io.Reader, table string) error {
 	br := bufio.NewReader(r)
 	headerLine, err := br.ReadString('\n')
 	if err != nil && headerLine == "" {
@@ -651,31 +708,43 @@ func loadCSV(target string, r io.Reader, table string) error {
 	if err != nil || len(cols) == 0 {
 		return fmt.Errorf("could not parse CSV header")
 	}
+	qtable := sqlIdent(table)
 	defs := make([]string, len(cols))
 	for i, c := range cols {
-		defs[i] = fmt.Sprintf("%q text", sanitizeIdent(c))
+		defs[i] = fmt.Sprintf("%s text", sqlIdent(c)) // preserve the header names verbatim
 	}
 	if err := run("docker", "exec", "-e", pgImportOptions, container(target),
 		"psql", "-q", "-U", pgUser, "-d", pgDatabase, "-c",
-		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %q (%s);", table, strings.Join(defs, ", "))); err != nil {
+		fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s);", qtable, strings.Join(defs, ", "))); err != nil {
 		return err
 	}
-	fmt.Printf("  loading rows into table %q…\n", table)
+	p.Logf("  loading rows into table %q…\n", table)
 	// The header line is already consumed, so COPY the remaining rows (HEADER false).
 	return pipeInto(target, br, "psql", "-q", "-U", pgUser, "-d", pgDatabase, "-c",
-		fmt.Sprintf(`\copy %q FROM STDIN WITH (FORMAT csv, HEADER false)`, table))
+		fmt.Sprintf(`\copy %s FROM STDIN WITH (FORMAT csv, HEADER false)`, qtable))
 }
 
-func loadJSON(target string, r io.Reader, table string) error {
-	if err := run("docker", "exec", "-e", pgImportOptions, container(target),
-		"psql", "-q", "-U", pgUser, "-d", pgDatabase, "-c",
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %q (id bigserial PRIMARY KEY, doc jsonb);`, table)); err != nil {
+// loadJSON loads a stream of JSON documents (a JSON array or NDJSON, e.g. from a
+// MongoDB collection) into a RELATIONAL table: the documents land in a jsonb
+// staging table, then their top-level keys are turned into typed columns
+// (scalars → text/numeric/boolean, `_id` unwrapped from {$oid}, nested
+// objects/arrays kept as jsonb). Documents that aren't JSON objects fall back to
+// a single jsonb column.
+func loadJSON(p *Progress, target string, r io.Reader, table string) error {
+	stage := table + "__vdb_stage"
+	qstage, qtable := sqlIdent(stage), sqlIdent(table)
+	if err := psqlExec(target, fmt.Sprintf(
+		`DROP TABLE IF EXISTS %s; CREATE TABLE %s (id bigserial PRIMARY KEY, doc jsonb);`, qstage, qstage)); err != nil {
 		return err
 	}
 	br := bufio.NewReader(r)
 	first, err := peekNonSpace(br)
 	if err != nil {
-		return fmt.Errorf("empty JSON")
+		// An empty source (e.g. an empty MongoDB collection) is not an error: leave
+		// an empty table behind (a single jsonb column, since there are no keys to
+		// infer columns from) and move on.
+		p.Logf("  (empty — 0 rows)\n")
+		return psqlExec(target, fmt.Sprintf(`DROP TABLE IF EXISTS %s; CREATE TABLE %s (doc jsonb);`, qstage, qtable))
 	}
 	pr, pw := io.Pipe()
 	go func() {
@@ -684,7 +753,7 @@ func loadJSON(target string, r io.Reader, table string) error {
 		fmt.Fprintln(w, "BEGIN;")
 		emit := func(raw string) {
 			if raw = strings.TrimSpace(raw); raw != "" {
-				fmt.Fprintf(w, `INSERT INTO %q(doc) VALUES ('%s'::jsonb);`+"\n", table, strings.ReplaceAll(raw, "'", "''"))
+				fmt.Fprintf(w, `INSERT INTO %s(doc) VALUES ('%s'::jsonb);`+"\n", qstage, strings.ReplaceAll(raw, "'", "''"))
 			}
 		}
 		if first == '[' { // a JSON array
@@ -707,8 +776,114 @@ func loadJSON(target string, r io.Reader, table string) error {
 		fmt.Fprintln(w, "COMMIT;")
 		w.Flush()
 	}()
-	fmt.Printf("  loading JSON documents into %q(doc jsonb)…\n", table)
-	return pipeInto(target, pr, "psql", "-q", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1")
+	p.Logf("  loading documents…\n")
+	if err := pipeInto(target, pr, "psql", "-q", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1"); err != nil {
+		return err
+	}
+	return relationalizeJSON(p, target, stage, table)
+}
+
+// psqlExec runs a (possibly multi-statement) SQL string on an instance. The first
+// -c quiets routine NOTICEs (e.g. "table … does not exist, skipping" from a
+// defensive DROP IF EXISTS); both -c options share the one psql session.
+func psqlExec(target, sql string) error {
+	return run("docker", "exec", "-e", pgImportOptions, container(target),
+		"psql", "-q", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1",
+		"-c", "SET client_min_messages=warning;", "-c", sql)
+}
+
+// relationalizeJSON turns the jsonb documents in `stage` into a typed relational
+// table `table`: each top-level document key becomes a column, its Postgres type
+// inferred from the JSON types seen across the collection.
+func relationalizeJSON(p *Progress, target, stage, table string) error {
+	qstage, qtable := sqlIdent(stage), sqlIdent(table)
+	// Discover top-level keys and the JSON types each takes (chr(9) = a real tab
+	// separator, robust to keys containing punctuation). Only object docs have keys.
+	q := fmt.Sprintf(`SELECT e.key || chr(9) || coalesce(jsonb_typeof(e.value),'null') `+
+		`FROM %s s, LATERAL jsonb_each(s.doc) e WHERE jsonb_typeof(s.doc)='object' GROUP BY 1`, qstage)
+	out, err := capture("docker", "exec", container(target),
+		"psql", "-U", pgUser, "-d", pgDatabase, "-tAc", q)
+	if err != nil {
+		return fmt.Errorf("inspect documents: %w", err)
+	}
+	kinds := map[string]map[string]bool{}
+	var keys []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) < 2 {
+			continue
+		}
+		k, t := parts[0], parts[1]
+		if kinds[k] == nil {
+			kinds[k] = map[string]bool{}
+			keys = append(keys, k)
+		}
+		kinds[k][t] = true
+	}
+	if len(keys) == 0 {
+		// The documents aren't JSON objects — keep them as a single jsonb column.
+		p.Logf("  documents are not JSON objects — keeping a single jsonb column\n")
+		return psqlExec(target, fmt.Sprintf(`DROP TABLE IF EXISTS %s; ALTER TABLE %s RENAME TO %s;`, qtable, qstage, qtable))
+	}
+	sort.Strings(keys)
+	// Put _id first for readability.
+	ordered := keys
+	if kinds["_id"] != nil {
+		ordered = []string{"_id"}
+		for _, k := range keys {
+			if k != "_id" {
+				ordered = append(ordered, k)
+			}
+		}
+	}
+	// Column names are the source keys VERBATIM (quoted, case-preserving) — the
+	// migration must not alter the source schema.
+	var defs, sel, names []string
+	for _, k := range ordered {
+		qcol := sqlIdent(k)
+		typ, expr := jsonColumn(k, kinds[k])
+		defs = append(defs, qcol+" "+typ)
+		sel = append(sel, expr+" AS "+qcol)
+		names = append(names, k)
+	}
+	p.Logf("  relationalizing → %d column(s): %s\n", len(names), strings.Join(names, ", "))
+	ddl := fmt.Sprintf(`DROP TABLE IF EXISTS %s; CREATE TABLE %s (%s); `+
+		`INSERT INTO %s SELECT %s FROM %s WHERE jsonb_typeof(doc)='object'; DROP TABLE %s;`,
+		qtable, qtable, strings.Join(defs, ", "), qtable, strings.Join(sel, ", "), qstage, qstage)
+	return psqlExec(target, ddl)
+}
+
+// jsonColumn maps a document key (given the set of JSON types its values take) to
+// a Postgres column type and the SELECT expression that extracts it from `doc`.
+func jsonColumn(key string, kinds map[string]bool) (pgType, expr string) {
+	kq := strings.ReplaceAll(key, "'", "''")
+	if key == "_id" { // MongoDB's id: unwrap {$oid}, else take it as text
+		return "text", fmt.Sprintf("coalesce(doc->'%s'->>'$oid', doc->>'%s')", kq, kq)
+	}
+	var ts []string
+	for t := range kinds {
+		if t != "null" {
+			ts = append(ts, t)
+		}
+	}
+	if len(ts) == 1 {
+		switch ts[0] {
+		case "string":
+			return "text", fmt.Sprintf("doc->>'%s'", kq)
+		case "number":
+			return "numeric", fmt.Sprintf("(doc->>'%s')::numeric", kq)
+		case "boolean":
+			return "boolean", fmt.Sprintf("(doc->>'%s')::boolean", kq)
+		}
+	}
+	if len(ts) == 0 { // all null
+		return "text", fmt.Sprintf("doc->>'%s'", kq)
+	}
+	// nested object/array, or mixed types → keep the raw JSON value
+	return "jsonb", fmt.Sprintf("doc->'%s'", kq)
 }
 
 // pipeInto streams r into a command run inside the target's container.
@@ -747,6 +922,21 @@ func sqlQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") +
 // quoting so the generated schema and the dumped INSERTs agree on names).
 func pgIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
+// sqlIdent renders a SOURCE name (a MongoDB key, a collection, a CSV header) as a
+// quoted, case-preserving Postgres identifier — the migration must not alter the
+// source schema, so unlike sanitizeIdent it keeps the exact case and punctuation,
+// enforcing only Postgres's 63-byte identifier limit. (Instance/dataset/container
+// names still use sanitizeIdent, which must be filesystem/docker-safe.)
+func sqlIdent(s string) string {
+	if len(s) > 63 {
+		s = s[:63]
+	}
+	if s == "" {
+		s = "col"
+	}
+	return pgIdent(s)
+}
+
 func sanitizeIdent(s string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
@@ -756,7 +946,9 @@ func sanitizeIdent(s string) string {
 			b.WriteRune('_')
 		}
 	}
-	out := strings.Trim(b.String(), "_")
+	// Trim only trailing underscores (artifacts of sanitizing punctuation); a
+	// leading underscore is a valid Postgres identifier and meaningful (e.g. _id).
+	out := strings.TrimRight(b.String(), "_")
 	if out == "" || (out[0] >= '0' && out[0] <= '9') {
 		out = "t_" + out
 	}

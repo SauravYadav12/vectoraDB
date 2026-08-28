@@ -1,6 +1,9 @@
 // Typed client for the VectoraDB control-plane API (cookie/session auth).
-export const API = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8080'
-export const AGENT_API = (import.meta.env.VITE_AGENT_API_URL as string) || 'http://localhost:8088'
+// When the UI is served by the control-plane itself (the embedded production
+// build sets VITE_API_URL=""), API is "" — i.e. same-origin, relative requests.
+// The dev server (`make web-dev`, VITE_API_URL unset) falls back to :8080.
+export const API = (import.meta.env.VITE_API_URL as string | undefined) ?? 'http://localhost:8080'
+export const AGENT_API = (import.meta.env.VITE_AGENT_API_URL as string | undefined) ?? 'http://localhost:8088'
 
 export type User = { id: number; email: string }
 export type HAState = { enabled: boolean; standby: string; streaming: boolean; primary: string }
@@ -73,14 +76,87 @@ export const getLedger = (name: string, filters: Record<string, string> = {}) =>
   const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => v)).toString()
   return req('GET', `${API}/api/branches/${name}/ledger${qs ? '?' + qs : ''}`) as Promise<QueryResult>
 }
-export const importDB = (source: string, target: string, continuous = false) =>
-  req('POST', `${API}/api/import`, { source, target, continuous }) as Promise<{ status: string; target: string; tables: number }>
-export const importFile = async (file: File, target: string) => {
+// --- migration (streamed as Server-Sent Events) ---
+export type ImportResult = { status: string; target: string; tables: number }
+export type ImportEvent =
+  | { type: 'log'; line: string }
+  | { type: 'progress'; done: number; total: number; label: string }
+  | { type: 'done'; status: string; target: string; tables: number }
+  | { type: 'error'; message: string }
+
+// consumeSSE reads a text/event-stream response, dispatching each event and
+// resolving with the final `done` payload (or rejecting on `error`).
+async function consumeSSE(res: Response, onEvent: (e: ImportEvent) => void): Promise<ImportResult> {
+  if (!res.ok) {
+    if (res.status === 401 && location.pathname !== '/login') location.assign('/login')
+    const data = await res.json().catch(() => ({}))
+    throw new ApiError(res.status, (data as { error?: string }).error || `HTTP ${res.status}`)
+  }
+  const reader = res.body!.getReader()
+  const dec = new TextDecoder()
+  let buf = '', result: ImportResult | null = null, errMsg: string | null = null
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    let idx: number
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2)
+      let event = 'message', dataStr = ''
+      for (const ln of chunk.split('\n')) {
+        if (ln.startsWith('event:')) event = ln.slice(6).trim()
+        else if (ln.startsWith('data:')) dataStr += ln.slice(5).trim()
+      }
+      let data: Record<string, unknown> = {}
+      try { data = JSON.parse(dataStr) } catch { /* ignore keep-alives */ }
+      if (event === 'log') onEvent({ type: 'log', line: String(data.line ?? '') })
+      else if (event === 'progress') onEvent({ type: 'progress', done: Number(data.done), total: Number(data.total), label: String(data.label ?? '') })
+      else if (event === 'done') { result = data as unknown as ImportResult; onEvent({ type: 'done', ...(data as any) }) }
+      else if (event === 'error') { errMsg = String(data.message ?? 'migration failed'); onEvent({ type: 'error', message: errMsg }) }
+    }
+  }
+  if (errMsg) throw new Error(errMsg)
+  if (!result) throw new Error('the migration ended without a result')
+  return result
+}
+
+export const importDBStream = async (source: string, target: string, continuous: boolean, onEvent: (e: ImportEvent) => void) => {
+  const res = await fetch(`${API}/api/import`, {
+    method: 'POST', credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source, target, continuous }),
+  })
+  return consumeSSE(res, onEvent)
+}
+
+export const importFileStream = async (file: File, target: string, onEvent: (e: ImportEvent) => void) => {
   const fd = new FormData()
   fd.append('file', file)
   if (target) fd.append('target', target)
-  const r = await fetch(`${API}/api/import/file`, { method: 'POST', credentials: 'include', body: fd })
-  const data = await r.json().catch(() => ({}))
-  if (!r.ok) throw new ApiError(r.status, (data && (data as { error?: string }).error) || `HTTP ${r.status}`)
-  return data as { status: string; target: string; tables: number }
+  const res = await fetch(`${API}/api/import/file`, { method: 'POST', credentials: 'include', body: fd })
+  return consumeSSE(res, onEvent)
+}
+
+// --- ETL pipelines ---
+export type PipelineModel = { name: string; sql: string; materialized?: string }
+export type PipelineTest = { name?: string; model?: string; type: string; column?: string; values?: string[]; min?: number; sql?: string }
+export type PipelineSpec = { source: string; models: PipelineModel[]; tests: PipelineTest[] }
+export type Pipeline = { id: string; name: string; spec: string; created: number; updated: number }
+export type TestResult = { name: string; passed: boolean; detail?: string }
+export type PipelineRun = { id: string; pipeline_id: string; status: string; started: number; finished: number; tables: number; tests: string }
+export type PipelineRunResult = ImportResult & { tests?: TestResult[]; failed?: boolean }
+
+export const listPipelines = () => req('GET', `${API}/api/pipelines`) as Promise<{ pipelines: Pipeline[] }>
+export const getPipeline = (id: string) => req('GET', `${API}/api/pipelines/${encodeURIComponent(id)}`) as Promise<Pipeline>
+export const createPipeline = (name: string, spec: PipelineSpec) =>
+  req('POST', `${API}/api/pipelines`, { name, spec }) as Promise<Pipeline>
+export const updatePipeline = (id: string, name: string, spec: PipelineSpec) =>
+  req('PUT', `${API}/api/pipelines/${encodeURIComponent(id)}`, { name, spec })
+export const deletePipeline = (id: string) =>
+  req('DELETE', `${API}/api/pipelines/${encodeURIComponent(id)}`)
+export const listPipelineRuns = (id: string) =>
+  req('GET', `${API}/api/pipelines/${encodeURIComponent(id)}/runs`) as Promise<{ runs: PipelineRun[] }>
+export const runPipelineStream = async (id: string, onEvent: (e: ImportEvent) => void) => {
+  const res = await fetch(`${API}/api/pipelines/${encodeURIComponent(id)}/run`, { method: 'POST', credentials: 'include' })
+  return consumeSSE(res, onEvent) as Promise<PipelineRunResult>
 }

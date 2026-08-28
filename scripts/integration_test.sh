@@ -90,8 +90,48 @@ assert_eq "blocked attempt is recorded durably" \
   "$(pg vec-main "SELECT count(*) FROM vdb.schema_ledger WHERE status='BLOCKED' AND command_tag='DROP TABLE'")" "1"
 pg vec-main "SET vdb.allow_destructive=on; DROP TABLE IF EXISTS ledg" >/dev/null 2>&1
 
+echo "### 9. ETL pipeline (extract -> transform -> test)"
+sudo docker rm -f mongo-src >/dev/null 2>&1
+sudo docker run -d --name mongo-src --network vectoradb mongo:7 >/dev/null 2>&1
+for i in $(seq 1 40); do sudo docker exec mongo-src mongosh --quiet --eval 'db.runCommand({ping:1}).ok' >/dev/null 2>&1 && break; sleep 1; done
+sudo docker exec mongo-src mongosh --quiet shop --eval \
+  'db.buildings.insertMany([{name:"Empire State",floors:102,addr:{city:"New York"}},{name:"Willis Tower",floors:108,addr:{city:"Chicago"}},{name:"Aon Center",floors:83,addr:{city:"Chicago"}}])' >/dev/null 2>&1
+$S branch delete etltest >/dev/null 2>&1
+cat > /tmp/etl_ok.json << 'JSON'
+{"source":"mongodb://mongo-src/shop","models":[{"name":"stg_buildings","sql":"SELECT name, floors, addr->>'city' AS city FROM {{ source('buildings') }}"},{"name":"city_counts","sql":"SELECT city, count(*) AS n FROM {{ ref('stg_buildings') }} GROUP BY city"}],"tests":[{"name":"name not null","type":"not_null","model":"stg_buildings","column":"name"}]}
+JSON
+$S pipeline run /tmp/etl_ok.json --as etltest >/dev/null 2>&1
+assert_eq "ETL passing pipeline exits 0" "$?" "0"
+assert_eq "ETL landed raw source in the raw schema" "$(pg vec-etltest "SELECT to_regclass('raw.buildings') IS NOT NULL")" "t"
+assert_eq "ETL model flattened jsonb into a column" "$(pg vec-etltest "SELECT city FROM public.stg_buildings WHERE name='Empire State'")" "New York"
+assert_eq "ETL aggregate model computed" "$(pg vec-etltest "SELECT n FROM public.city_counts WHERE city='Chicago'")" "2"
+
+$S branch delete etlfail >/dev/null 2>&1
+cat > /tmp/etl_fail.json << 'JSON'
+{"source":"mongodb://mongo-src/shop","models":[{"name":"stg_b","sql":"SELECT name FROM {{ source('buildings') }}"}],"tests":[{"name":"needs 100 rows","type":"row_count_min","model":"stg_b","min":100}]}
+JSON
+$S pipeline run /tmp/etl_fail.json --as etlfail >/dev/null 2>&1
+assert_eq "ETL failing test yields non-zero exit" "$?" "1"
+assert_eq "ETL failed run keeps its data" "$(pg vec-etlfail "SELECT count(*) FROM public.stg_b")" "3"
+
+echo "### 10. schema fidelity (source field names preserved exactly)"
+sudo docker exec mongo-src mongosh --quiet shop --eval \
+  'db.leaseAiChats.insertOne({userId:new ObjectId(), createdAt:new Date(), gallery:[{fileName:"a.jpg"}]})' >/dev/null 2>&1
+$S branch delete faithtest >/dev/null 2>&1
+cat > /tmp/faith.json << 'JSON'
+{"source":"mongodb://mongo-src/shop","models":[{"name":"stg","sql":"SELECT \"userId\", \"createdAt\", \"gallery\" FROM {{ source('leaseAiChats') }}"}]}
+JSON
+$S pipeline run /tmp/faith.json --as faithtest >/dev/null 2>&1
+assert_eq "camelCase column preserved (userId, not userid)" "$(pg vec-faithtest "SELECT count(*) FROM information_schema.columns WHERE table_schema='raw' AND table_name='leaseAiChats' AND column_name='userId'")" "1"
+assert_eq "nested array kept as jsonb" "$(pg vec-faithtest "SELECT data_type FROM information_schema.columns WHERE table_schema='raw' AND table_name='leaseAiChats' AND column_name='gallery'")" "jsonb"
+assert_eq "transform resolves the case-sensitive source" "$(pg vec-faithtest "SELECT count(*) FROM public.stg")" "1"
+
 echo "### cleanup"
 $S branch delete itb >/dev/null 2>&1
+$S branch delete etltest >/dev/null 2>&1
+$S branch delete etlfail >/dev/null 2>&1
+$S branch delete faithtest >/dev/null 2>&1
+sudo docker rm -f mongo-src >/dev/null 2>&1
 
 echo
 echo "==== ${PASS} passed, ${FAIL} failed ===="

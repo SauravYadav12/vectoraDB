@@ -8,8 +8,10 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/vectoradb/vectoradb/internal/host"
 	"github.com/vectoradb/vectoradb/internal/proxy"
 	"github.com/vectoradb/vectoradb/internal/version"
+	"github.com/vectoradb/vectoradb/web"
 )
 
 // background services managed by `start`/`stop` (name -> subcommand + flags).
@@ -72,6 +75,8 @@ Migration:
                        Continuous logical replication from a Postgres source
                        (initial copy + streaming) for zero-downtime cutover
   import-cutover <name>  Stop replication for a --continuous instance, keeping its data
+  pipeline run <spec.json> [--as <name>]  Run an ETL pipeline (extract → land raw →
+                       SQL transform models → data-quality tests) into a fresh instance
 
 High availability:
   ha enable            Provision a hot standby streaming from main
@@ -122,11 +127,16 @@ func main() {
 			must(daemon.Start(name, args))
 		}
 		fmt.Println("\nVectoraDB is up (background):")
+		if web.FS() != nil {
+			fmt.Println("  web UI       http://localhost:8080")
+		}
 		fmt.Println("  control API  http://localhost:8080/api/status")
 		fmt.Println("  agent API    http://localhost:8088   (POST /agents/{id}/branch)")
 		fmt.Println("  gateway(SQL) postgres://vectoradb:vectoradb@localhost:6432/<branch>")
 		fmt.Println("  storage      http://localhost:9001   (minioadmin/minioadmin)")
-		fmt.Println("\nWeb UI is a separate app — run it with:  make web-dev   (http://localhost:5173)")
+		if web.FS() == nil {
+			fmt.Println("\nThe web UI isn't embedded in this build — run it with:  make web-dev   (http://localhost:5173)")
+		}
 		fmt.Println("Stop everything with: vdb stop")
 	case "stop":
 		for name := range services {
@@ -194,6 +204,8 @@ func main() {
 			os.Exit(2)
 		}
 		must(branch.ImportCutover(os.Args[2]))
+	case "pipeline":
+		pipelineCmd(os.Args[2:])
 	case "ha":
 		haCmd(os.Args[2:])
 	case "user":
@@ -286,6 +298,33 @@ func importCmd(args []string) {
 	}
 	_, err := branch.Import(source, target)
 	must(err)
+}
+
+// pipelineCmd handles `vdb pipeline run <spec.json> [--as <instance>]`: an ETL
+// pipeline (extract → land raw → SQL transforms → tests) into a fresh instance.
+func pipelineCmd(args []string) {
+	if len(args) < 2 || args[0] != "run" {
+		fmt.Println("usage: vdb pipeline run <spec.json> [--as <instance>]")
+		os.Exit(2)
+	}
+	specPath, target := args[1], ""
+	for i := 2; i < len(args); i++ {
+		if args[i] == "--as" && i+1 < len(args) {
+			target, i = args[i+1], i+1
+		}
+	}
+	b, err := os.ReadFile(specPath)
+	must(err)
+	var spec branch.PipelineSpec
+	must(json.Unmarshal(b, &spec))
+	if target == "" {
+		target = "pl-" + strings.TrimSuffix(filepath.Base(specPath), filepath.Ext(specPath))
+	}
+	res, err := branch.RunPipeline(&branch.Progress{Log: os.Stdout}, spec, target)
+	must(err)
+	if res.Failed {
+		os.Exit(1)
+	}
 }
 
 // ledgerCmd handles `vdb ledger [branch] [--limit N]` and

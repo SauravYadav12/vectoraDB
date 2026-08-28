@@ -19,3 +19,6 @@ func configureDetach(cmd *exec.Cmd) {
 
 // terminate asks pid to shut down gracefully.
 func terminate(pid int) { _ = syscall.Kill(pid, syscall.SIGTERM) }
+
+// kill forcibly terminates pid (uninterceptable).
+func kill(pid int) { _ = syscall.Kill(pid, syscall.SIGKILL) }

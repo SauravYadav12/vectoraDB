@@ -203,21 +203,29 @@ export default function Console() {
 }
 
 function Grid({ res, showCommand }: { res: QueryResult; showCommand?: boolean }) {
+  const [expanded, setExpanded] = useState<number | null>(null)
+  useEffect(() => { setExpanded(null) }, [res]) // reset when new results arrive
   if (res.error) return <div className="err">{res.error}</div>
   const cols = res.columns || []
   const rows = res.rows || []
+  const openRow = expanded != null ? rows[expanded] : null
   return (
     <>
       {showCommand && <div className="okmsg">✓ {res.command || 'ok'} · {rows.length} row{rows.length === 1 ? '' : 's'}</div>}
       {cols.length > 0 ? (
         <div className="grid-wrap table-wrap">
           <table>
-            <thead><tr>{cols.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>
+            <thead><tr><th className="expand-col"></th>{cols.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>
             <tbody>
               {rows.length === 0
-                ? <tr><td colSpan={cols.length} className="muted">no rows</td></tr>
+                ? <tr><td colSpan={cols.length + 1} className="muted">no rows</td></tr>
                 : rows.map((r, i) => (
-                  <tr key={i}>{r.map((v, j) => <td key={j}>{v === null ? 'NULL' : String(v)}</td>)}</tr>
+                  <tr key={i}>
+                    <td className="expand-col">
+                      <button className="expand-btn" title="View row as JSON" onClick={() => setExpanded(i)}>{'{ }'}</button>
+                    </td>
+                    {r.map((v, j) => <td key={j}>{v === null ? 'NULL' : String(v)}</td>)}
+                  </tr>
                 ))}
             </tbody>
           </table>
@@ -225,6 +233,49 @@ function Grid({ res, showCommand }: { res: QueryResult; showCommand?: boolean })
       ) : (
         <div className="okmsg">✓ {res.command || 'ok'}</div>
       )}
+      {openRow && <JsonModal cols={cols} row={openRow} onClose={() => setExpanded(null)} />}
     </>
+  )
+}
+
+// JsonModal shows one result row as pretty JSON. jsonb cells come back as JSON
+// strings, so we parse them into nested structure for a clean document view.
+function JsonModal({ cols, row, onClose }: { cols: string[]; row: unknown[]; onClose: () => void }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const obj: Record<string, unknown> = {}
+  cols.forEach((c, i) => {
+    const v = row[i]
+    if (typeof v === 'string') {
+      const t = v.trim()
+      if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
+        try { obj[c] = JSON.parse(t); return } catch { /* keep as string */ }
+      }
+    }
+    obj[c] = v
+  })
+  const text = JSON.stringify(obj, null, 2)
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1200) } catch { /* ignore */ }
+  }
+
+  return (
+    <div className="json-modal-backdrop" onClick={onClose}>
+      <div className="json-modal" onClick={e => e.stopPropagation()}>
+        <div className="json-modal-head">
+          <span>Row as JSON</span>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="ghost" onClick={copy}>{copied ? 'Copied ✓' : 'Copy'}</button>
+            <button className="ghost" onClick={onClose} title="Close (Esc)">✕</button>
+          </div>
+        </div>
+        <pre className="json-modal-body">{text}</pre>
+      </div>
+    </div>
   )
 }

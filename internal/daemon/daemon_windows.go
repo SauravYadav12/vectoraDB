@@ -16,3 +16,5 @@ func processAlive(pid int) bool { return false }
 func configureDetach(cmd *exec.Cmd) {}
 
 func terminate(pid int) {}
+
+func kill(pid int) {}
