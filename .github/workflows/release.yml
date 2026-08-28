@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Cuts the GitHub release and attaches the binaries install.sh / install.ps1
+# download. The ZFS bundle is attached separately by wsl-zfs.yml, which runs on
+# the same tag — this job creates the release first so that upload has somewhere
+# to go.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach to (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Build release artifacts
+        run: make release VERSION="${TAG#v}"
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+
+      # install.ps1 fetches every one of these by name; a release missing any of
+      # them installs a vdb.exe that cannot then set itself up.
+      - name: Assert the full asset set is present
+        run: |
+          set -eux
+          test -f dist/vdb-windows-amd64.exe
+          test -f dist/vdb-linux-amd64
+          test -f dist/vdb-linux-arm64
+          test -f dist/vdb-darwin-amd64
+          test -f dist/vdb-darwin-arm64
+          test -f dist/vectoradb-docker-context.tar.gz
+
+      # Created as a prerelease and left as a draft-free placeholder so
+      # wsl-zfs.yml can upload the ZFS bundle into it. Promote it by hand once
+      # the install has been smoke-tested on a clean Windows machine.
+      - name: Create the release if it does not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --prerelease --generate-notes --title "$TAG"
+
+      - name: Attach binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release upload "$TAG" dist/vdb-* dist/vectoradb-docker-context.tar.gz --clobber
