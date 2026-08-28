@@ -37,7 +37,7 @@ Usage:
   vdb <command> [args]
 
 Setup:
-  setup                One-time: create/start the local VM (macOS) and bring the stack up
+  setup                One-time: create/start the local engine VM (macOS: Lima, Windows: WSL2) and bring the stack up
 
 Stack:
   start                Bring EVERYTHING up in the background: stack + gateway + APIs

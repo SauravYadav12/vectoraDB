@@ -3,7 +3,7 @@
 # VectoraDB runs inside the Linux dev VM (ZFS + Docker); day-to-day operation is
 # via `lima /tmp/vdb <command>`. This Makefile just builds/checks the CLI.
 
-.PHONY: build vet fmt vm-build test integration web-dev web-build release
+.PHONY: build vet fmt vm-build test integration web-dev web-build release wsl-kernel
 
 VERSION ?= 0.1.0
 LDFLAGS := -s -w -X github.com/vectoradb/vectoradb/internal/version.Version=$(VERSION)
@@ -11,15 +11,16 @@ LDFLAGS := -s -w -X github.com/vectoradb/vectoradb/internal/version.Version=$(VE
 build:            ## Build the CLI into ./bin/vdb (host)
 	go build -o bin/vdb ./cmd/vdb
 
-release:          ## Cross-compile release binaries into ./dist (darwin+linux, amd64+arm64)
+release:          ## Cross-compile release binaries into ./dist (darwin+linux+windows)
 	@rm -rf dist && mkdir -p dist
-	@for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64; do \
-		os=$${t%/*}; arch=$${t#*/}; \
-		echo "  building vdb-$$os-$$arch"; \
+	@for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/amd64; do \
+		os=$${t%/*}; arch=$${t#*/}; ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
+		echo "  building vdb-$$os-$$arch$$ext"; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
-			go build -trimpath -ldflags "$(LDFLAGS)" -o dist/vdb-$$os-$$arch ./cmd/vdb; \
+			go build -trimpath -ldflags "$(LDFLAGS)" -o dist/vdb-$$os-$$arch$$ext ./cmd/vdb; \
 	done
 	@echo "release binaries in ./dist (version $(VERSION))"
+	@echo "note: the Windows installer also needs the ZFS-enabled WSL2 kernel + Ubuntu rootfs assets (see make wsl-kernel / docs/windows-setup.md)"
 
 vet:              ## go vet
 	go vet ./...
@@ -41,3 +42,7 @@ web-dev:          ## Run the web UI dev server (http://localhost:5173) against t
 
 web-build:        ## Build the web UI to web/dist (static site)
 	npm --prefix web ci && npm --prefix web run build
+
+wsl-kernel:       ## Build the ZFS-enabled WSL2 kernel + Ubuntu rootfs (Linux builder/CI only)
+	deploy/wsl-kernel/build.sh
+	deploy/wsl-kernel/build-rootfs.sh

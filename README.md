@@ -66,10 +66,23 @@ curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy
 sudo vdb start
 ```
 
-`vdb setup` (macOS) / `vdb start` (Linux) creates the VM, installs Docker + ZFS,
+**Windows** — runs the engine in a dedicated [WSL2](https://learn.microsoft.com/windows/wsl/) distro
+(the Windows analog of the macOS VM). Needs Windows 10 21H2+/11 with WSL2 and virtualization enabled:
+
+```powershell
+irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
+vdb setup
+```
+
+`vdb setup` creates the WSL2 distro, applies a ZFS-enabled kernel, installs Docker + ZFS, and brings
+the stack up — then every command is just `vdb …`, forwarded into WSL2 transparently. See
+[docs/windows-setup.md](docs/windows-setup.md) for prerequisites, the `.wslconfig` kernel note, and
+troubleshooting.
+
+`vdb setup` (macOS/Windows) / `vdb start` (Linux) creates the VM, installs Docker + ZFS,
 builds the pool and image, and brings the database, gateway, and APIs up — no
-manual steps. On macOS, `vdb` transparently runs the engine inside the VM, so
-every command below is just `vdb …` with no `lima` prefix.
+manual steps. On macOS (Lima) and Windows (WSL2), `vdb` transparently runs the engine inside the
+VM, so every command below is just `vdb …` with no `lima`/`wsl` prefix.
 
 > **Install from source (contributors):** clone the repo and `make vm-build`
 > (builds the Linux binary into the VM) or `make build` (host binary). See
