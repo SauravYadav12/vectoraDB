@@ -20,6 +20,9 @@ on:
         description: 'Expected uname -r (e.g. 6.6.87.2-microsoft-standard-WSL2)'
         required: false
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -51,8 +54,15 @@ jobs:
             dist/vectoradb-zfs.release
 
       # On a tag, attach the bundle to the release so install.ps1 can fetch it.
+      # release.yml normally created it long before this hour-long build ends,
+      # but this job must not fail just because it ran alone (a re-run, or a
+      # workflow_dispatch), so create it if it is missing.
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist/vectoradb-zfs-*.tar.gz dist/vectoradb-zfs.release --clobber
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --prerelease --generate-notes --title "$GITHUB_REF_NAME"
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/vectoradb-zfs-*.tar.gz dist/vectoradb-zfs.release --clobber
