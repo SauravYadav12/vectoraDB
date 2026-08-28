@@ -2,8 +2,7 @@
 
 // Pure, OS-independent helpers for the Windows/WSL2 launcher. They live in an
 // untagged file (not host_windows.go) so they unit-test on any platform — the
-// side-effecting wsl.exe / .wslconfig orchestration that calls them is in
-// host_windows.go.
+// side-effecting wsl.exe orchestration that calls them is in host_windows.go.
 package host
 
 import (
@@ -15,6 +14,12 @@ import (
 // defaultWSLDistro is the dedicated distro `vdb setup` creates on Windows.
 const defaultWSLDistro = "vectoradb"
 
+// guestImageContext is where setup stages the docker/postgres build context
+// inside the distro. The engine's ensureImage() reads it from
+// VECTORADB_IMAGE_CONTEXT, so an installed user (who has no repo checkout, and
+// therefore nothing for findImageContext to discover) can still build the image.
+const guestImageContext = "/usr/local/share/vectoradb/docker/postgres"
+
 // resolveWSLDistro picks the distro name from an override (e.g. an env var),
 // falling back to the dedicated default.
 func resolveWSLDistro(override string) string {
@@ -24,13 +29,48 @@ func resolveWSLDistro(override string) string {
 	return defaultWSLDistro
 }
 
-// wslArgs builds the `wsl.exe` argument list that runs the guest engine binary
-// inside a distro, marking the process as in-guest so it never forwards again.
+// guestPATH is Debian's default root PATH. The engine resolves zfs, zpool and
+// docker with exec.LookPath, and ZFS installs under /usr/local — but the
+// environment `wsl.exe -- env` inherits depends on how the distro was created,
+// so the forwarded command is given an explicit PATH rather than a hopeful one.
+const guestPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// guestZpoolDevice is the block device backing the ZFS pool inside the distro.
 //
-//	wsl.exe -d <distro> -- env VECTORADB_IN_GUEST=1 <guest> <args…>
-func wslArgs(distro, guest string, args []string) []string {
-	base := []string{"-d", distro, "--", "env", envInGuest + "=1", guest}
-	return append(base, args...)
+// The engine's default is a plain file vdev, which the WSL2 kernel cannot back a
+// pool with — `zpool create` on a file fails there with "no such pool or
+// dataset", while the same file behind a loop device works. So setup attaches
+// the pool image to a loop device and points the engine here through
+// VECTORADB_ZPOOL_DEVICE, a knob the engine already honours.
+//
+// It is a symlink, not a loop device directly: every WSL2 distro shares one
+// kernel, so loop numbers are global and contended (Docker Desktop and Rancher
+// Desktop take them, and an unregistered distro leaves its binding behind).
+// vectoradb-zpool.service picks whichever device is free and repoints this name.
+const guestZpoolDevice = "/dev/vectoradb-pool"
+
+// guestEnv is the environment every forwarded command runs with inside the
+// distro: the in-guest marker (so the guest vdb never forwards again), a PATH
+// that finds the ZFS userland, the staged docker build context, and the
+// loop-backed pool vdev.
+func guestEnv() []string {
+	return []string{
+		envInGuest + "=1",
+		"PATH=" + guestPATH,
+		"VECTORADB_IMAGE_CONTEXT=" + guestImageContext,
+		"VECTORADB_ZPOOL_DEVICE=" + guestZpoolDevice,
+	}
+}
+
+// wslArgs builds the `wsl.exe` argument list that runs the guest engine binary
+// inside a distro under the given environment.
+//
+//	wsl.exe -d <distro> -- env <env…> <guest> <args…>
+func wslArgs(distro, guest string, env, args []string) []string {
+	out := []string{"-d", distro, "--", "env"}
+	out = append(out, env...)
+	out = append(out, guest)
+	return append(out, args...)
 }
 
 type wslDistro struct{ Name, State string }
@@ -77,51 +117,16 @@ func winPathToMnt(p string) string {
 	return p
 }
 
-// mergeWslConfig returns %UserProfile%\.wslconfig content with the [wsl2] section's
-// kernel= set to kernelPath: replacing an existing kernel=, inserting into an
-// existing [wsl2] section, or appending a new section — preserving other keys.
-func mergeWslConfig(existing, kernelPath string) string {
-	kline := "kernel=" + kernelPath
-	if strings.TrimSpace(existing) == "" {
-		return "[wsl2]\n" + kline + "\n"
-	}
-	lines := strings.Split(strings.ReplaceAll(existing, "\r\n", "\n"), "\n")
+// parseKernelRelease extracts the kernel release from `uname -r` output (or from
+// the .release file shipped with the ZFS bundle), tolerating the UTF-16LE
+// wrapping and trailing newlines that wsl.exe adds.
+func parseKernelRelease(raw []byte) string {
+	return strings.TrimSpace(decodeWSLOutput(raw))
+}
 
-	// First pass: does a [wsl2] section exist, and does it already have kernel=?
-	hasWsl2, hasKernel, inWsl2 := false, false, false
-	for _, ln := range lines {
-		t := strings.TrimSpace(ln)
-		if strings.HasPrefix(t, "[") {
-			inWsl2 = strings.EqualFold(t, "[wsl2]")
-			hasWsl2 = hasWsl2 || inWsl2
-			continue
-		}
-		if inWsl2 && strings.HasPrefix(strings.ToLower(t), "kernel=") {
-			hasKernel = true
-		}
-	}
-	if !hasWsl2 {
-		return strings.TrimRight(existing, "\n") + "\n\n[wsl2]\n" + kline + "\n"
-	}
-
-	// Second pass: rewrite in place.
-	var out []string
-	inWsl2 = false
-	for _, ln := range lines {
-		t := strings.TrimSpace(ln)
-		if strings.HasPrefix(t, "[") {
-			inWsl2 = strings.EqualFold(t, "[wsl2]")
-			out = append(out, ln)
-			if inWsl2 && !hasKernel {
-				out = append(out, kline) // insert right after the [wsl2] header
-			}
-			continue
-		}
-		if inWsl2 && hasKernel && strings.HasPrefix(strings.ToLower(t), "kernel=") {
-			out = append(out, kline) // replace the existing kernel=
-			continue
-		}
-		out = append(out, ln)
-	}
-	return strings.Join(out, "\n")
+// zfsBundleName is the ZFS artifact for a kernel release. The release is part of
+// the filename because the modules only load against the exact kernel they were
+// built for — a stale bundle must be a missing file, not a silent mismatch.
+func zfsBundleName(kernelRelease string) string {
+	return "vectoradb-zfs-" + strings.TrimSpace(kernelRelease) + ".tar.gz"
 }

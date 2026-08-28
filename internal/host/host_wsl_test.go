@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"unicode/utf16"
 )
@@ -21,10 +20,16 @@ func TestResolveWSLDistro(t *testing.T) {
 	}
 }
 
-// TC1.2 — the wsl.exe argument list, including the in-guest marker.
+// TC1.2 — the wsl.exe argument list, including the in-guest marker and the
+// staged image-context path.
 func TestWSLArgs(t *testing.T) {
-	got := wslArgs("vectoradb", "/usr/local/bin/vdb", []string{"branch", "list"})
-	want := []string{"-d", "vectoradb", "--", "env", "VECTORADB_IN_GUEST=1", "/usr/local/bin/vdb", "branch", "list"}
+	got := wslArgs("vectoradb", "/usr/local/bin/vdb", guestEnv(), []string{"branch", "list"})
+	want := []string{"-d", "vectoradb", "--", "env",
+		"VECTORADB_IN_GUEST=1",
+		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"VECTORADB_IMAGE_CONTEXT=/usr/local/share/vectoradb/docker/postgres",
+		"VECTORADB_ZPOOL_DEVICE=/dev/vectoradb-pool",
+		"/usr/local/bin/vdb", "branch", "list"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("wslArgs = %q, want %q", got, want)
 	}
@@ -71,28 +76,30 @@ func TestWinPathToMnt(t *testing.T) {
 	}
 }
 
-// TC1.5 — .wslconfig merge: empty, existing-section-no-kernel, existing-kernel.
-// Uses a backslash-free sentinel path (KP/KP2) — mergeWslConfig treats the path
-// as opaque, so this keeps the assertions free of escaping ambiguity.
-func TestMergeWslConfig(t *testing.T) {
-	// empty → new section
-	if got := mergeWslConfig("", "KP"); got != "[wsl2]\nkernel=KP\n" {
-		t.Errorf("empty: got %q", got)
+// TC1.5 — the kernel release read back from `uname -r` inside the distro, which
+// arrives UTF-16LE-wrapped and newline-terminated from wsl.exe.
+func TestParseKernelRelease(t *testing.T) {
+	const rel = "6.6.87.2-microsoft-standard-WSL2"
+	if got := parseKernelRelease(encodeUTF16LE(rel+"\n", true)); got != rel {
+		t.Errorf("parseKernelRelease(utf16) = %q, want %q", got, rel)
 	}
-	// existing [wsl2] without kernel → inserted, other keys preserved
-	got := mergeWslConfig("[wsl2]\nmemory=4GB\n", "KP")
-	if !strings.Contains(got, "kernel=KP") || !strings.Contains(got, "memory=4GB") {
-		t.Errorf("insert: got %q", got)
+	if got := parseKernelRelease([]byte(rel + "\r\n")); got != rel {
+		t.Errorf("parseKernelRelease(utf8) = %q, want %q", got, rel)
 	}
-	// existing kernel → replaced (no duplicate)
-	got = mergeWslConfig("[wsl2]\nkernel=OLD\nswap=0\n", "KP2")
-	if strings.Contains(got, "OLD") || strings.Count(got, "kernel=") != 1 || !strings.Contains(got, "swap=0") {
-		t.Errorf("replace: got %q", got)
+	if got := parseKernelRelease([]byte("  \n")); got != "" {
+		t.Errorf("parseKernelRelease(blank) = %q, want empty", got)
 	}
-	// no [wsl2] section but other section present → appends [wsl2]
-	got = mergeWslConfig("[experimental]\nfoo=1\n", "KP")
-	if !strings.Contains(got, "[wsl2]") || !strings.Contains(got, "kernel=KP") || !strings.Contains(got, "foo=1") {
-		t.Errorf("append: got %q", got)
+}
+
+// TC1.7 — the ZFS bundle is named for the kernel it was built against, so a
+// stale bundle is a missing file rather than a module that silently won't load.
+func TestZFSBundleName(t *testing.T) {
+	want := "vectoradb-zfs-6.6.87.2-microsoft-standard-WSL2.tar.gz"
+	if got := zfsBundleName("6.6.87.2-microsoft-standard-WSL2"); got != want {
+		t.Errorf("zfsBundleName = %q, want %q", got, want)
+	}
+	if got := zfsBundleName(" 6.6.87.2-microsoft-standard-WSL2\n"); got != want {
+		t.Errorf("zfsBundleName(untrimmed) = %q, want %q", got, want)
 	}
 }
 

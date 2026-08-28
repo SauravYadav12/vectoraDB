@@ -74,10 +74,11 @@ irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/instal
 vdb setup
 ```
 
-`vdb setup` creates the WSL2 distro, applies a ZFS-enabled kernel, installs Docker + ZFS, and brings
-the stack up — then every command is just `vdb …`, forwarded into WSL2 transparently. See
-[docs/windows-setup.md](docs/windows-setup.md) for prerequisites, the `.wslconfig` kernel note, and
-troubleshooting.
+`vdb setup` creates the WSL2 distro, installs Docker + ZFS into it, and brings the stack up — then
+every command is just `vdb …`, forwarded into WSL2 transparently. Your kernel and `.wslconfig` are
+not modified, so Docker Desktop, Rancher Desktop, and your other distros are unaffected. See
+[docs/windows-setup.md](docs/windows-setup.md) for prerequisites, how ZFS gets in without a custom
+kernel, and troubleshooting.
 
 `vdb setup` (macOS/Windows) / `vdb start` (Linux) creates the VM, installs Docker + ZFS,
 builds the pool and image, and brings the database, gateway, and APIs up — no

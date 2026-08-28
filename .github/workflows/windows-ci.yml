@@ -54,5 +54,8 @@ jobs:
           go-version: '1.26'
       - name: make release (all targets)
         run: make release VERSION=ci-test
-      - name: assert windows exe exists
-        run: test -f dist/vdb-windows-amd64.exe
+      - name: assert the Windows release assets exist
+        run: |
+          test -f dist/vdb-windows-amd64.exe
+          test -f dist/vdb-linux-amd64                    # staged into the WSL distro
+          test -f dist/vectoradb-docker-context.tar.gz    # staged as the image build context

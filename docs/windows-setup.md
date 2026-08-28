@@ -19,34 +19,41 @@ vdb setup
 ```
 
 `install.ps1` places `vdb.exe` in `%LOCALAPPDATA%\Programs\vectoradb` (added to your PATH) and stages
-the support assets `vdb setup` needs: the Linux engine binary, a **ZFS-enabled WSL2 kernel**, and an
-Ubuntu rootfs.
+what `vdb setup` needs: the Linux engine binary, an Ubuntu rootfs, the Postgres image build context,
+and the OpenZFS modules built for the WSL2 kernel **your machine is running**.
 
 `vdb setup` then, once:
 
-1. points `%UserProfile%\.wslconfig` at the ZFS-enabled kernel and restarts WSL (`wsl --shutdown`);
-2. imports a dedicated `vectoradb` WSL2 distro and enables systemd in it;
-3. installs Docker + ZFS, loads the `zfs` module, and installs the engine binary;
+1. imports a dedicated `vectoradb` WSL2 distro and enables systemd in it;
+2. installs Docker, and installs ZFS into that distro's own module tree;
+3. verifies `modprobe zfs` actually works before going further;
 4. brings the stack up (`vdb start`).
 
 After that, use VectoraDB exactly as on macOS/Linux — `vdb branch create`, `vdb import`, `vdb status`,
 etc. Services are reachable from Windows on `localhost` (gateway `:6432`, control API `:8080`, agent
 API `:8088`, MinIO console `:9001`) via WSL2 localhost-forwarding.
 
-## Why a custom kernel?
+## Your other WSL distros are not touched
 
 The stock WSL2 kernel ships **no ZFS module**, and ZFS is what powers VectoraDB's instant
-copy-on-write branches. So `vdb setup` installs a ZFS-enabled WSL2 kernel and references it from
-`.wslconfig`:
+copy-on-write branches. VectoraDB does **not** solve that by replacing your kernel.
 
-```ini
-[wsl2]
-kernel=C:\\Users\\<you>\\AppData\\Local\\Programs\\vectoradb\\vectoradb-wsl-kernel
+WSL mounts its module tree as an overlay — the stock modules are a read-only lower layer, and the
+upper layer lives on each distro's own disk. You can see it in any distro:
+
+```
+$ grep lib/modules /proc/mounts
+none /usr/lib/modules/6.6.87.2-microsoft-standard-WSL2 overlay rw,lowerdir=/modules,
+     upperdir=/lib/modules/6.6.87.2-microsoft-standard-WSL2/rw/upper,...
 ```
 
-> **Note:** `.wslconfig kernel=` is **machine-wide** — it applies to *all* your WSL2 distros. The
-> VectoraDB kernel is a **superset** of the stock kernel (same config plus ZFS), so your other
-> distros keep working. To revert, remove the `kernel=` line and run `wsl --shutdown`.
+So `vdb setup` writes `zfs.ko` into the **`vectoradb` distro's** upper layer and runs `depmod`. Your
+`%UserProfile%\.wslconfig` is never modified, no `kernel=` or `kernelModules=` line is added, and
+Docker Desktop, Rancher Desktop, and your other distros keep running the stock kernel untouched.
+
+The trade-off is that the modules are tied to one exact kernel version. `vdb setup` reads `uname -r`
+and looks for the bundle built for it by name, so a WSL kernel bump produces a clear "no ZFS bundle
+for this WSL kernel" message rather than a module that silently refuses to load.
 
 ## Troubleshooting
 
@@ -54,8 +61,12 @@ kernel=C:\\Users\\<you>\\AppData\\Local\\Programs\\vectoradb\\vectoradb-wsl-kern
 | --- | --- |
 | `WSL is not installed` | Run `wsl --install` in an **Administrator** PowerShell, reboot, retry. |
 | `WSL is present but not healthy` | Enable virtualization in the BIOS and the *Virtual Machine Platform* feature; `wsl --update`. |
-| Kernel change not taking effect | `wsl --shutdown`, then rerun the failing command. |
-| `zpool: command not found` / module errors | Re-run `vdb setup`; confirm the kernel asset is next to `vdb.exe` and `.wslconfig` points at it. |
+| `no ZFS bundle for this WSL kernel (…)` | Your WSL kernel is newer than this VectoraDB release. Update VectoraDB, or build the bundle yourself (below). Do **not** `wsl --update` — that moves the kernel further ahead. |
+| `ZFS is not usable in the "vectoradb" distro` | The staged modules were built for a different kernel. Check `wsl -d vectoradb -- uname -r` against the bundle filename in `%LOCALAPPDATA%\Programs\vectoradb`. |
+| `systemd did not finish booting` | `wsl --terminate vectoradb`, then re-run `vdb setup`. |
+| `the VectoraDB ZFS pool device is not ready` | Deliberate stop: the pool could not be imported, and VectoraDB will not run the engine in case it recreates the pool over your data. Run `wsl --terminate vectoradb` and retry; if it persists, see `journalctl -u vectoradb-zpool.service` inside the distro. |
+| `pool I/O is currently suspended` | The pool lost its backing device. `wsl --terminate vectoradb` and re-run `vdb setup`; the pool is re-imported at boot. |
+| `wsl` commands hang and `wsl --shutdown` never returns | A suspended ZFS pool can wedge the WSL VM. In an **Administrator** PowerShell: `Restart-Service WSLService -Force` (a reboot also clears it). |
 | `vdb` not found after install | Open a **new** terminal (PATH updates apply to new sessions). |
 
 ## Uninstall
@@ -63,18 +74,31 @@ kernel=C:\\Users\\<you>\\AppData\\Local\\Programs\\vectoradb\\vectoradb-wsl-kern
 ```powershell
 wsl --unregister vectoradb                       # remove the distro + its data
 Remove-Item -Recurse "$env:LOCALAPPDATA\Programs\vectoradb"
-# then remove the kernel= line from %UserProfile%\.wslconfig and: wsl --shutdown
 ```
 
-## Building the WSL2 kernel (maintainers)
+Nothing else to undo — VectoraDB made no machine-wide WSL changes.
 
-The kernel + rootfs assets are produced on a Linux builder / CI, not the user's machine:
+## Building the ZFS bundle (maintainers)
+
+The ZFS artifact is produced on a Linux builder / CI (a WSL2 Ubuntu distro works), not on the user's
+machine:
 
 ```bash
-make wsl-kernel   # deploy/wsl-kernel/build.sh + build-rootfs.sh
+make wsl-zfs
 ```
 
-This builds Microsoft's WSL2 kernel with OpenZFS modules (`vectoradb-wsl-kernel`), bakes the matching
-modules into an Ubuntu rootfs (`vectoradb-rootfs.tar`), and both are attached to the GitHub release
-alongside `vdb-windows-amd64.exe` and `vdb-linux-amd64`. Pin the kernel and ZFS versions together in
-`deploy/wsl-kernel/build.sh` and re-run the end-to-end Windows test after any bump.
+This builds the Microsoft WSL2 kernel tree purely as a **compile target** (OpenZFS needs a configured
+tree with `Module.symvers`), builds OpenZFS against it, and packages the modules plus matching
+userland as `dist/vectoradb-zfs-<kernelrelease>.tar.gz`. The kernel image itself is not shipped.
+
+Pin `KERNEL_TAG` in `deploy/wsl-zfs/build.sh` to the tag matching the kernel WSL ships, and
+`EXPECT_RELEASE` to that kernel's `uname -r`; the build **fails loudly** on a mismatch, because
+modules built for the wrong kernel are the single most likely way this breaks. Bump `KERNEL_TAG` and
+`ZFS_TAG` together and re-run the end-to-end Windows test after any bump.
+
+> **Gotcha:** the build exports an empty `LOCALVERSION`. `scripts/setlocalversion` appends `+` to
+> the release whenever that variable is unset and the tree isn't a cleanly-tagged checkout — which
+> a `git clone --depth 1` always looks like, because `git describe --exact-match` can't resolve the
+> tag in a shallow clone. Without it you get `…-microsoft-standard-WSL2+`, whose vermagic will not
+> load on the real `…-microsoft-standard-WSL2` kernel. (An empty `.scmversion` does *not* fix this.)
+> The `EXPECT_RELEASE` assertion is what catches it, so do not weaken it into a warning.
