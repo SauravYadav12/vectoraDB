@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Shell scripts must keep LF endings even when checked out on Windows: the
+# Windows workflow runs deploy/wsl-zfs/build.sh and the guest-side scripts inside
+# WSL, and a CRLF shebang fails there with a bare "not found".
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Makefile        text eol=lf
+
+# PowerShell is Windows-native; CRLF is its convention.
+*.ps1           text eol=crlf
+
+# Go tooling is LF-only (gofmt reports CRLF files as unformatted).
+*.go            text eol=lf
+go.mod          text eol=lf
+go.sum          text eol=lf

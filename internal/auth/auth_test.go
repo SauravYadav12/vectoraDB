@@ -9,12 +9,22 @@ import (
 	"testing"
 )
 
+// testStore opens a Store in a temp dir and closes it when the test ends.
+//
+// The close is not optional on Windows: t.TempDir's cleanup deletes the
+// directory, and Windows refuses to unlink a file that is still open, so a
+// leaked handle fails the test in cleanup rather than in the test body.
 func testStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(Config{DBPath: filepath.Join(t.TempDir(), "t.db"), WebOrigin: "http://x", SignupOpen: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("closing the store: %v", err)
+		}
+	})
 	return s
 }
 

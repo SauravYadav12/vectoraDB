@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 func runDir() string {
@@ -43,7 +42,7 @@ func readPid(name string) int {
 // Alive reports whether the service's recorded process is still running.
 func Alive(name string) bool {
 	pid := readPid(name)
-	return pid > 0 && syscall.Kill(pid, 0) == nil
+	return pid > 0 && processAlive(pid)
 }
 
 // Start launches a service detached (no-op if already running). args are the
@@ -63,7 +62,7 @@ func Start(name string, args []string) error {
 	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logf
 	cmd.Stderr = logf
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from our session
+	configureDetach(cmd) // detach from our session (Unix); no-op on the Windows stub
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -73,7 +72,7 @@ func Start(name string, args []string) error {
 // Stop signals a service to terminate and clears its pidfile.
 func Stop(name string) {
 	if pid := readPid(name); pid > 0 {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		terminate(pid)
 	}
 	_ = os.Remove(pidPath(name))
 }

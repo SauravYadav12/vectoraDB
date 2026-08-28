@@ -101,6 +101,19 @@ func Open(cfg Config) (*Store, error) {
 	return &Store{db: db, cfg: cfg}, nil
 }
 
+// Close releases the underlying database handle.
+//
+// Long-lived processes hold a Store for their whole lifetime, so this rarely
+// matters to them — but anything that opens a Store and discards it leaks the
+// handle, and on Windows an open handle also keeps the file locked, so the
+// database cannot be removed or replaced until the process exits.
+func (s *Store) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v

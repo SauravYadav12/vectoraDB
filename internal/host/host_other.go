@@ -1,0 +1,29 @@
+//go:build !darwin && !windows
+
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package host
+
+import (
+	"fmt"
+	"io"
+	"runtime"
+)
+
+// On Linux the engine runs in-process, so `vdb setup` has nothing to do. Any
+// other OS is unsupported.
+func hostSetup() error {
+	if runtime.GOOS == "linux" {
+		fmt.Println("Linux host — no VM needed. Run `vdb start`.")
+		return nil
+	}
+	return fmt.Errorf("unsupported host OS %q", runtime.GOOS)
+}
+
+// forward/forwardStdin are never reached on Linux (host.Maybe runs the engine
+// in-process); they exist so the shared dispatch links on every platform.
+func forward(args []string) error { return forwardStdin(args, nil) }
+
+func forwardStdin(args []string, stdin io.Reader) error {
+	return fmt.Errorf("unsupported host OS %q — cannot forward to a VM", runtime.GOOS)
+}

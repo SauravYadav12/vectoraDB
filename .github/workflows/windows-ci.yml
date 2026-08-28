@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Windows CI for the vdb launcher: the automated [A]/[W-CI] test cases from the
+# Windows-port plan. Full [W-E2E] (WSL2 + the ZFS kernel + the live stack) needs a
+# self-hosted runner with nested virtualization and is tracked separately.
+name: windows-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      # TC0.1/TC0.3 — native Windows build + unit tests (incl. the launcher pure
+      # helpers TC1.1–TC1.6 and the daemon windows stub TC0.5).
+      - name: go build (native windows)
+        run: go build ./...
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+      # TC0.4 — cross-compile the other targets from Windows to catch tag breakage.
+      - name: cross-compile linux + darwin
+        shell: bash
+        run: |
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            GOOS=${t%/*} GOARCH=${t#*/} go build -o /dev/null ./cmd/vdb
+          done
+
+      # TC4.4/TC4.5 — installer logic (functions only; guarded main is not run).
+      - name: Pester (install.ps1)
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -MinimumVersion 5.0 -Force -Scope CurrentUser
+          Invoke-Pester deploy/install.Tests.ps1 -Output Detailed -CI
+
+  cross-compile-from-linux:
+    # TC0.1/TC4.1 — the release matrix (incl. windows/amd64) builds from Linux.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: make release (all targets)
+        run: make release VERSION=ci-test
+      - name: assert the Windows release assets exist
+        run: |
+          test -f dist/vdb-windows-amd64.exe
+          test -f dist/vdb-linux-amd64                    # staged into the WSL distro
+          test -f dist/vectoradb-docker-context.tar.gz    # staged as the image build context
