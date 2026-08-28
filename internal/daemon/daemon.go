@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func runDir() string {
@@ -69,10 +70,21 @@ func Start(name string, args []string) error {
 	return os.WriteFile(pidPath(name), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
 }
 
-// Stop signals a service to terminate and clears its pidfile.
+// Stop terminates a service and clears its pidfile. It waits for a graceful exit
+// after SIGTERM and escalates to SIGKILL if the process is still alive, so the
+// pidfile is only cleared once the process is actually gone — otherwise `status`
+// would report "stopped" while the old process kept serving (and a later `start`
+// couldn't rebind the port).
 func Stop(name string) {
-	if pid := readPid(name); pid > 0 {
-		terminate(pid)
+	pid := readPid(name)
+	if pid > 0 {
+		terminate(pid) // SIGTERM — ask it to shut down
+		for i := 0; i < 30 && processAlive(pid); i++ {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if processAlive(pid) {
+			kill(pid) // still up after ~3s — force it
+		}
 	}
 	_ = os.Remove(pidPath(name))
 }
