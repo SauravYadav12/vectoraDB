@@ -10,6 +10,8 @@ import Docs from './pages/Docs'
 import Guide from './pages/Guide'
 import Ledger from './pages/Ledger'
 import Import from './pages/Import'
+import Pipelines from './pages/Pipelines'
+import PipelineEditor from './pages/PipelineEditor'
 import { ConfirmProvider } from './confirm'
 import Dashboard from './pages/Dashboard'
 import Console from './pages/Console'
@@ -77,6 +79,7 @@ function Layout() {
             <NavLink to="/ledger">Ledger</NavLink>
             <NavLink to="/console">Console</NavLink>
             <NavLink to="/import">Import</NavLink>
+            <NavLink to="/pipelines">Pipelines</NavLink>
             <NavLink to="/keys">API keys</NavLink>
           </>}
         </div>
@@ -110,6 +113,8 @@ const router = createBrowserRouter([
       { path: 'dashboard', element: <RequireAuth><Dashboard /></RequireAuth> },
       { path: 'ledger', element: <RequireAuth><Ledger /></RequireAuth> },
       { path: 'import', element: <RequireAuth><Import /></RequireAuth> },
+      { path: 'pipelines', element: <RequireAuth><Pipelines /></RequireAuth> },
+      { path: 'pipelines/:id', element: <RequireAuth><PipelineEditor /></RequireAuth> },
       { path: 'console', element: <RequireAuth><Console /></RequireAuth> },
       { path: 'keys', element: <RequireAuth><ApiKeys /></RequireAuth> },
     ],

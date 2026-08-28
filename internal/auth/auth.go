@@ -68,6 +68,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS oauth_identities (
   provider TEXT NOT NULL, subject TEXT NOT NULL, user_id INTEGER NOT NULL,
   PRIMARY KEY (provider, subject)
+);
+CREATE TABLE IF NOT EXISTS pipelines (
+  id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, name TEXT NOT NULL,
+  spec TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  id TEXT PRIMARY KEY,
+  pipeline_id TEXT NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL, status TEXT NOT NULL,
+  started INTEGER NOT NULL, finished INTEGER, tables INTEGER NOT NULL DEFAULT 0,
+  tests TEXT NOT NULL DEFAULT '[]', log TEXT NOT NULL DEFAULT ''
 );`
 
 // Open opens (and migrates) the SQLite store.
