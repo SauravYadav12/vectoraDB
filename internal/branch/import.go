@@ -107,7 +107,14 @@ func importInstance(target, defName, desc string, load func(string) error) (stri
 	if err := load(target); err != nil {
 		return target, fmt.Errorf("import failed: %w", err)
 	}
-	fmt.Printf("\n✓ Imported into instance %q — %d table(s) now present.\n", target, TableCount(target))
+	// A finished load that produced no tables is a failure, not a success — the
+	// usual cause is the wrong database named in the source. (Loaders with a more
+	// specific diagnosis, e.g. loadMySQL, return before reaching here.)
+	n := TableCount(target)
+	if n == 0 {
+		return target, fmt.Errorf("no tables were imported into %q — the source is empty or the wrong database was named (check the connection string or file)", target)
+	}
+	fmt.Printf("\n✓ Imported into instance %q — %d table(s) now present.\n", target, n)
 	fmt.Printf("  Connect: postgres://vectoradb:<API_KEY>@localhost:6432/%s\n", target)
 	fmt.Printf("  Browse:  the web console (Console / Ledger), branch = %q\n", target)
 	return target, nil
@@ -144,6 +151,11 @@ func ImportContinuous(source, target string) (string, error) {
 	if err := run("docker", "exec", "-e", pgImportOptions, container(target), "bash", "-c", schemaScript); err != nil {
 		return target, fmt.Errorf("copy schema from source: %w", err)
 	}
+	// If the schema copy produced no tables, the source is empty or the wrong
+	// database was named — fail before setting up an empty subscription.
+	if TableCount(target) == 0 {
+		return target, fmt.Errorf("the source database has no tables to replicate (check the database name in the connection string)")
+	}
 	// Best-effort: create a publication covering all tables on the source. If the
 	// role lacks privilege or a publication named vdb_pub already exists, continue —
 	// the subscription below surfaces any real problem.
@@ -168,6 +180,11 @@ func ImportContinuous(source, target string) (string, error) {
 // ImportCutover stops the continuous replication started by ImportContinuous,
 // leaving the copied data in place so the instance becomes standalone.
 func ImportCutover(target string) error {
+	// Guard the wrong-instance / never-replicated case before finalizing: an
+	// instance with no tables means continuous replication landed nothing.
+	if TableCount(target) == 0 {
+		return fmt.Errorf("instance %q has no tables — continuous replication never landed anything (the source was empty or the wrong database was named); nothing to finalize", target)
+	}
 	fmt.Printf("Finalizing %q — stopping replication, keeping data…\n", target)
 	if err := run("docker", "exec", container(target), "psql", "-U", pgUser, "-d", pgDatabase,
 		"-c", "DROP SUBSCRIPTION IF EXISTS vdb_sub;"); err != nil {
