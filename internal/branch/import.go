@@ -39,9 +39,16 @@ const (
 // Import loads a Postgres source (postgres://…) or a local file (.sql/.csv/.json)
 // into a new instance named target, returning the resolved instance name.
 func Import(source, target string) (string, error) {
-	if isPostgresDSN(source) {
+	switch {
+	case isPostgresDSN(source):
 		return importInstance(target, defaultTargetName(source), "PostgreSQL source (pg_dump)",
 			func(t string) error { return loadPostgres(t, source) })
+	case hasScheme(source, "mysql", "mariadb"):
+		return importInstance(target, defaultTargetName(source), "MySQL/MariaDB source (pgloader)",
+			func(t string) error { return loadMySQL(t, source) })
+	case hasScheme(source, "mongodb", "mongodb+srv"):
+		return importInstance(target, defaultTargetName(source), "MongoDB source (collections → JSONB)",
+			func(t string) error { return loadMongo(t, source) })
 	}
 	info, err := os.Stat(source)
 	if err != nil || info.IsDir() {
@@ -87,6 +94,11 @@ func importInstance(target, defName, desc string, load func(string) error) (stri
 	if err := Create(target, "main"); err != nil {
 		return "", fmt.Errorf("create target instance %q: %w", target, err)
 	}
+	// Relax the destructive-DDL guardrail for the bulk load — external loaders
+	// (pgloader) use their own connections, so PGOPTIONS alone isn't enough. The
+	// logging triggers stay on, so the migration is still recorded in the ledger.
+	setGuard(target, false)
+	defer setGuard(target, true)
 	if err := prepareTarget(target); err != nil {
 		return target, fmt.Errorf("prepare target: %w", err)
 	}
@@ -98,6 +110,70 @@ func importInstance(target, defName, desc string, load func(string) error) (stri
 	fmt.Printf("  Connect: postgres://vectoradb:<API_KEY>@localhost:6432/%s\n", target)
 	fmt.Printf("  Browse:  the web console (Console / Ledger), branch = %q\n", target)
 	return target, nil
+}
+
+// ImportContinuous sets up continuous logical replication from a Postgres source
+// into a fresh instance: an initial copy followed by streaming changes, so you can
+// cut over with zero downtime. The source must allow logical replication
+// (wal_level=logical), and the connecting role must be replication-capable and own
+// (or be able to read) the tables.
+func ImportContinuous(source, target string) (string, error) {
+	if !isPostgresDSN(source) {
+		return "", fmt.Errorf("--continuous requires a postgres:// source (logical replication)")
+	}
+	if target == "" {
+		target = defaultTargetName(source)
+	}
+	fmt.Printf("Creating instance %q…\n", target)
+	if err := Create(target, "main"); err != nil {
+		return "", fmt.Errorf("create target instance %q: %w", target, err)
+	}
+	setGuard(target, false)
+	defer setGuard(target, true)
+	if err := prepareTarget(target); err != nil {
+		return target, fmt.Errorf("prepare target: %w", err)
+	}
+	// Copy the schema (structure only) first: logical replication replicates data,
+	// not DDL, so the subscriber needs the tables to exist before it can populate
+	// them. --no-publications/--no-subscriptions keep the source's own replication
+	// objects out of the target.
+	fmt.Println("Copying schema (structure only)…")
+	schemaScript := fmt.Sprintf("set -euo pipefail; pg_dump %s --schema-only --no-owner --no-acl --no-comments "+
+		"--no-publications --no-subscriptions | psql -q -U %s -d %s", shellQuote(source), pgUser, pgDatabase)
+	if err := run("docker", "exec", "-e", pgImportOptions, container(target), "bash", "-c", schemaScript); err != nil {
+		return target, fmt.Errorf("copy schema from source: %w", err)
+	}
+	// Best-effort: create a publication covering all tables on the source. If the
+	// role lacks privilege or a publication named vdb_pub already exists, continue —
+	// the subscription below surfaces any real problem.
+	fmt.Println("Ensuring a publication on the source…")
+	_ = run("docker", "exec", container(target), "psql", source, "-v", "ON_ERROR_STOP=0",
+		"-c", "CREATE PUBLICATION vdb_pub FOR ALL TABLES;")
+	// Subscribe on the target: initial copy + streaming changes.
+	fmt.Println("Creating subscription (initial copy, then streaming)…")
+	sub := fmt.Sprintf("CREATE SUBSCRIPTION vdb_sub CONNECTION %s PUBLICATION vdb_pub;", sqlQuote(source))
+	if err := run("docker", "exec", "-e", pgImportOptions, container(target),
+		"psql", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1", "-c", sub); err != nil {
+		return target, fmt.Errorf("could not start replication — the source must allow logical replication "+
+			"(wal_level=logical), expose a replication-capable role, and be reachable from VectoraDB: %w", err)
+	}
+	fmt.Printf("\n✓ Continuous replication active into %q.\n", target)
+	fmt.Println("  The initial copy runs now; subsequent changes stream continuously.")
+	fmt.Println("  Progress:  SELECT * FROM pg_stat_subscription;")
+	fmt.Printf("  Cut over once caught up:  vdb import-cutover %s\n", target)
+	return target, nil
+}
+
+// ImportCutover stops the continuous replication started by ImportContinuous,
+// leaving the copied data in place so the instance becomes standalone.
+func ImportCutover(target string) error {
+	fmt.Printf("Finalizing %q — stopping replication, keeping data…\n", target)
+	if err := run("docker", "exec", container(target), "psql", "-U", pgUser, "-d", pgDatabase,
+		"-c", "DROP SUBSCRIPTION IF EXISTS vdb_sub;"); err != nil {
+		return err
+	}
+	fmt.Printf("✓ %q is now a standalone instance (%d tables).\n", target, TableCount(target))
+	return nil
 }
 
 // TableCount returns the number of user tables in an instance (excludes system
@@ -176,6 +252,122 @@ func loadPostgres(target, dsn string) error {
 		shellQuote(dsn), pgUser, pgDatabase)
 	return run("docker", "exec", "-e", pgImportOptions, container(target), "bash", "-c", script)
 }
+
+// loadMySQL migrates a MySQL/MariaDB source using pgloader (schema + data + type
+// mapping), run as a throwaway container on the shared network so it can reach
+// both the source and the target branch's Postgres.
+func loadMySQL(target, dsn string) error {
+	if err := ensurePgloaderImage(); err != nil {
+		return fmt.Errorf("prepare pgloader: %w", err)
+	}
+	dsn = strings.Replace(dsn, "mariadb://", "mysql://", 1)
+	pgTarget := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", pgUser, pgPassword, container(target), pgDatabase)
+	fmt.Println("  running pgloader (schema + data + type mapping)…")
+	// pgloader logs a fatal connection error but still exits 0, so inspect its
+	// output rather than trusting the exit code alone.
+	out, err := exec.Command("sudo", "docker", "run", "--rm", "--network", network,
+		pgloaderImage, "pgloader", dsn, pgTarget).CombinedOutput()
+	fmt.Print(string(out))
+	if err != nil {
+		return fmt.Errorf("pgloader: %w", err)
+	}
+	if strings.Contains(string(out), "Failed to connect") || strings.Contains(string(out), "UNSUPPORTED-AUTHENTICATION") {
+		return fmt.Errorf("pgloader could not read the source (see log above); for MySQL 8, connect as a user with mysql_native_password authentication")
+	}
+	return nil
+}
+
+// ensurePgloaderImage builds the local, arch-native pgloader image if it is not
+// already present. Idempotent; the build runs only on the first migration.
+func ensurePgloaderImage() error {
+	if exec.Command("sudo", "docker", "image", "inspect", pgloaderImage).Run() == nil {
+		return nil
+	}
+	fmt.Println("  building the pgloader image (first run only)…")
+	dockerfile := "FROM debian:stable-slim\n" +
+		"RUN apt-get update && apt-get install -y --no-install-recommends pgloader ca-certificates && rm -rf /var/lib/apt/lists/*\n"
+	cmd := exec.Command("sudo", "docker", "build", "-t", pgloaderImage, "-")
+	cmd.Stdin = strings.NewReader(dockerfile)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// loadMongo migrates every collection in a MongoDB source into its own JSONB
+// table, using the mongo image's shell to enumerate and export documents.
+func loadMongo(target, uri string) error {
+	cols, err := mongoCollections(uri)
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return fmt.Errorf("no collections found at the source")
+	}
+	fmt.Printf("  %d collection(s): %s\n", len(cols), strings.Join(cols, ", "))
+	for _, c := range cols {
+		fmt.Printf("  collection %q → table %q…\n", c, sanitizeIdent(c))
+		if err := mongoImportCollection(target, uri, c); err != nil {
+			return fmt.Errorf("collection %q: %w", c, err)
+		}
+	}
+	return nil
+}
+
+func mongoCollections(uri string) ([]string, error) {
+	out, err := exec.Command("sudo", "docker", "run", "--rm", "--network", network, mongoImage,
+		"mongosh", uri, "--quiet", "--eval", "db.getCollectionNames().forEach(c=>print(c))").Output()
+	if err != nil {
+		return nil, fmt.Errorf("could not reach the MongoDB source: %w", err)
+	}
+	var cols []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "Warning") {
+			cols = append(cols, l)
+		}
+	}
+	return cols, nil
+}
+
+func mongoImportCollection(target, uri, coll string) error {
+	// Stream each document as one JSON line (extended JSON) into the JSON loader.
+	script := fmt.Sprintf("db.getCollection(%s).find().forEach(d=>print(EJSON.stringify(d)))", jsStr(coll))
+	cmd := exec.Command("sudo", "docker", "run", "--rm", "--network", network, mongoImage,
+		"mongosh", uri, "--quiet", "--eval", script)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if err := loadJSON(target, stdout, sanitizeIdent(coll)); err != nil {
+		_ = cmd.Wait()
+		return err
+	}
+	return cmd.Wait()
+}
+
+// setGuard enables/disables the ledger's destructive-DDL guardrail on an instance.
+func setGuard(target string, enabled bool) {
+	verb := "DISABLE"
+	if enabled {
+		verb = "ENABLE"
+	}
+	_ = run("docker", "exec", container(target), "psql", "-q", "-U", pgUser, "-d", pgDatabase,
+		"-c", fmt.Sprintf("ALTER EVENT TRIGGER vdb_guard_start %s;", verb))
+}
+
+func hasScheme(s string, schemes ...string) bool {
+	for _, sc := range schemes {
+		if strings.HasPrefix(s, sc+"://") {
+			return true
+		}
+	}
+	return false
+}
+
+func jsStr(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 func loadSQL(target string, r io.Reader) error {
 	return pipeInto(target, r, "psql", "-q", "-U", pgUser, "-d", pgDatabase)
@@ -279,6 +471,9 @@ func peekNonSpace(br *bufio.Reader) (byte, error) {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// sqlQuote renders s as a single-quoted SQL string literal.
+func sqlQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 func sanitizeIdent(s string) string {
 	var b strings.Builder

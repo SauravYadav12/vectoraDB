@@ -4,19 +4,22 @@ import { importDB, importFile } from '../api'
 
 export default function Import() {
   const [source, setSource] = useState('')
+  const [continuous, setContinuous] = useState(false)
   const [file, setFile] = useState<File | null>(null)
   const [target, setTarget] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  const [done, setDone] = useState<{ target: string; tables: number } | null>(null)
+  const [done, setDone] = useState<{ target: string; tables: number; status?: string } | null>(null)
 
-  const finish = (r: { target: string; tables: number }) => { setDone(r); setBusy(false) }
+  const finish = (r: { target: string; tables: number; status?: string }) => { setDone(r); setBusy(false) }
   const fail = (e: unknown) => { setErr((e as Error).message); setBusy(false) }
+
+  const isPg = /^postgres(ql)?:\/\//.test(source.trim())
 
   const runDSN = async () => {
     if (!source.trim()) return
     setBusy(true); setErr(''); setDone(null)
-    try { finish(await importDB(source.trim(), target.trim())) } catch (e) { fail(e) }
+    try { finish(await importDB(source.trim(), target.trim(), continuous && isPg)) } catch (e) { fail(e) }
   }
   const runFile = async () => {
     if (!file) return
@@ -42,17 +45,29 @@ export default function Import() {
         <label className="fld">
           <span>Source connection string</span>
           <input
-            placeholder="postgres://user:pass@host:5432/dbname"
+            placeholder="postgres:// · mysql:// · mariadb:// · mongodb://"
             value={source}
             onChange={e => setSource(e.target.value)}
             spellCheck={false}
             style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}
           />
-          <span className="hint">Any Postgres or Postgres-wire source (RDS, Neon, Supabase, CockroachDB…).</span>
+          <span className="hint">
+            Postgres/Postgres-wire (RDS, Neon, Supabase, CockroachDB) with full fidelity;
+            MySQL/MariaDB via <code>pgloader</code>; MongoDB collections → JSONB tables.
+          </span>
         </label>
+        {isPg && (
+          <label className="fld" style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 }}>
+            <input type="checkbox" checked={continuous} onChange={e => setContinuous(e.target.checked)} style={{ width: 'auto' }} />
+            <span style={{ margin: 0 }}>
+              Continuous replication <span className="muted">— initial copy + streaming for zero-downtime cutover
+              (source needs <code>wal_level=logical</code>)</span>
+            </span>
+          </label>
+        )}
         <div className="row" style={{ marginTop: 14 }}>
           <button className="primary" onClick={runDSN} disabled={busy || !source.trim()}>
-            {busy ? 'Migrating…' : 'Migrate from connection'}
+            {busy ? (continuous && isPg ? 'Starting replication…' : 'Migrating…') : (continuous && isPg ? 'Start continuous replication' : 'Migrate from connection')}
           </button>
         </div>
       </div>
@@ -75,8 +90,20 @@ export default function Import() {
 
       {done && (
         <div className="panel" style={{ marginTop: 14, borderColor: 'var(--green)' }}>
-          <b style={{ color: 'var(--green)' }}>✓ Migrated into instance “{done.target}”</b>
-          <p className="muted" style={{ margin: '6px 0 10px' }}>{done.tables} table{done.tables === 1 ? '' : 's'} imported.</p>
+          {done.status === 'replicating' ? (
+            <>
+              <b style={{ color: 'var(--green)' }}>✓ Continuous replication active → “{done.target}”</b>
+              <p className="muted" style={{ margin: '6px 0 10px' }}>
+                The initial copy is running and changes now stream continuously. When it has caught up, cut over with{' '}
+                <code>vdb import-cutover {done.target}</code>.
+              </p>
+            </>
+          ) : (
+            <>
+              <b style={{ color: 'var(--green)' }}>✓ Migrated into instance “{done.target}”</b>
+              <p className="muted" style={{ margin: '6px 0 10px' }}>{done.tables} table{done.tables === 1 ? '' : 's'} imported.</p>
+            </>
+          )}
           <div className="row">
             <Link className="ghost" to="/console">Open in SQL Console →</Link>
             <Link className="ghost" to="/ledger">View the ledger →</Link>
@@ -85,8 +112,8 @@ export default function Import() {
       )}
 
       <p className="muted" style={{ marginTop: 16, fontSize: 13 }}>
-        MySQL / MariaDB / SQLite migrate via <code>pgloader</code>; those adapters are on the roadmap. Large or scripted
-        migrations can also use the <code>vdb import</code> CLI.
+        Large or scripted migrations — and SQLite files — can also use the <code>vdb import</code> CLI, which streams
+        a file from anywhere on your machine into a new instance.
       </p>
     </div>
   )

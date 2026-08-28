@@ -66,7 +66,12 @@ Schema ledger (RECORD layer):
 
 Migration:
   import --from <src> [--as <name>]  Migrate a DB into a new instance. <src> is a
-                       postgres://… connection string or a .sql / .csv / .json file
+                       connection string — postgres://, mysql://, mariadb://, mongodb:// —
+                       or a .sql / .csv / .json file (picked from anywhere)
+  import --from <pg-dsn> --continuous [--as <name>]
+                       Continuous logical replication from a Postgres source
+                       (initial copy + streaming) for zero-downtime cutover
+  import-cutover <name>  Stop replication for a --continuous instance, keeping its data
 
 High availability:
   ha enable            Provision a hot standby streaming from main
@@ -183,6 +188,12 @@ func main() {
 		ledgerCmd(os.Args[2:])
 	case "import":
 		importCmd(os.Args[2:])
+	case "import-cutover":
+		if len(os.Args) < 3 {
+			fmt.Println("usage: vdb import-cutover <instance>")
+			os.Exit(2)
+		}
+		must(branch.ImportCutover(os.Args[2]))
 	case "ha":
 		haCmd(os.Args[2:])
 	case "user":
@@ -225,8 +236,11 @@ func restoreArg(args []string) string {
 // Postgres source or a .sql/.csv/.json file into a fresh VectoraDB instance.
 func importCmd(args []string) {
 	var source, target, kind, srcname string
+	var continuous bool
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--continuous":
+			continuous = true
 		case "--from":
 			if i+1 < len(args) {
 				source, i = args[i+1], i+1
@@ -262,6 +276,11 @@ func importCmd(args []string) {
 			srcname = "stdin"
 		}
 		_, err = branch.ImportReader(os.Stdin, k, srcname, target)
+		must(err)
+		return
+	}
+	if continuous {
+		_, err := branch.ImportContinuous(source, target)
 		must(err)
 		return
 	}

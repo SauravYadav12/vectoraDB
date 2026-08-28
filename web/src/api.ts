@@ -73,8 +73,8 @@ export const getLedger = (name: string, filters: Record<string, string> = {}) =>
   const qs = new URLSearchParams(Object.entries(filters).filter(([, v]) => v)).toString()
   return req('GET', `${API}/api/branches/${name}/ledger${qs ? '?' + qs : ''}`) as Promise<QueryResult>
 }
-export const importDB = (source: string, target: string) =>
-  req('POST', `${API}/api/import`, { source, target }) as Promise<{ status: string; target: string; tables: number }>
+export const importDB = (source: string, target: string, continuous = false) =>
+  req('POST', `${API}/api/import`, { source, target, continuous }) as Promise<{ status: string; target: string; tables: number }>
 export const importFile = async (file: File, target: string) => {
   const fd = new FormData()
   fd.append('file', file)

@@ -28,10 +28,16 @@ const (
 	mountBase   = "/vectoradb/branches"
 	network     = "vectoradb"
 	image       = "vectoradb/postgres-walg:16"
-	pgUser      = "vectoradb"
-	pgPassword  = "vectoradb"
-	pgDatabase  = "vectoradb"
-	pgUID       = "999" // the postgres user's uid inside the official image
+	// Throwaway loader images used by the migration adapters, run on the shared
+	// network so they can reach both the source and the target instance.
+	// pgloaderImage is built locally on first use — Debian packages pgloader for
+	// both amd64 and arm64, unlike the amd64-only Docker Hub image.
+	pgloaderImage = "vectoradb/pgloader:local" // MySQL/MariaDB → Postgres
+	mongoImage    = "mongo:7"                  // ships mongosh for enumerating/exporting collections
+	pgUser        = "vectoradb"
+	pgPassword    = "vectoradb"
+	pgDatabase    = "vectoradb"
+	pgUID         = "999" // the postgres user's uid inside the official image
 )
 
 func dataset(name string) string    { return datasetBase + "/" + name }

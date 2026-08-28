@@ -152,26 +152,37 @@ func registerAPI(mux *http.ServeMux) {
 		writeJSON(w, 200, runQuery(addr, body.SQL))
 	})
 
-	// Migration: import a source database into a new instance. The web wizard
-	// only accepts a postgres:// source (no arbitrary server file paths from a
-	// browser); file imports (.sql/.csv/.json) go through the `vdb import` CLI.
+	// Migration: import a source database into a new instance from a connection
+	// string. The web wizard accepts a URL source (no arbitrary server file paths
+	// from a browser); file imports (.sql/.csv/.json) go through /api/import/file.
 	mux.HandleFunc("POST /api/import", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Source string `json:"source"`
-			Target string `json:"target"`
+			Source     string `json:"source"`
+			Target     string `json:"target"`
+			Continuous bool   `json:"continuous"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		body.Source = strings.TrimSpace(body.Source)
-		if !strings.HasPrefix(body.Source, "postgres://") && !strings.HasPrefix(body.Source, "postgresql://") {
-			writeErr(w, 400, fmt.Errorf("web import needs a postgres:// source; use `vdb import` for .sql/.csv/.json files"))
+		if !isConnString(body.Source) {
+			writeErr(w, 400, fmt.Errorf("web import needs a connection string (postgres://, mysql://, mariadb://, mongodb://); use the file panel for .sql/.csv/.json"))
 			return
 		}
-		target, err := branch.Import(body.Source, strings.TrimSpace(body.Target))
+		var target string
+		var err error
+		if body.Continuous {
+			target, err = branch.ImportContinuous(body.Source, strings.TrimSpace(body.Target))
+		} else {
+			target, err = branch.Import(body.Source, strings.TrimSpace(body.Target))
+		}
 		if err != nil {
 			writeErr(w, 500, err)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"status": "imported", "target": target, "tables": branch.TableCount(target)})
+		status := "imported"
+		if body.Continuous {
+			status = "replicating"
+		}
+		writeJSON(w, 200, map[string]any{"status": status, "target": target, "tables": branch.TableCount(target)})
 	})
 
 	// Migration via file upload: a .sql/.csv/.json file streamed from the browser
@@ -349,6 +360,17 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, err error) {
 	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+// isConnString reports whether s is a database connection URL the import engine
+// understands (as opposed to a file path, which the browser must not send).
+func isConnString(s string) bool {
+	for _, scheme := range []string{"postgres://", "postgresql://", "mysql://", "mariadb://", "mongodb://", "mongodb+srv://"} {
+		if strings.HasPrefix(s, scheme) {
+			return true
+		}
+	}
+	return false
 }
 
 func logging(next http.Handler) http.Handler {
