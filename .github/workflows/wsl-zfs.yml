@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Build the OpenZFS bundle the Windows installer stages into the vectoradb WSL2
+# distro. The runner's own kernel is irrelevant: OpenZFS is compiled against the
+# Microsoft WSL2 kernel *source tree* pinned in deploy/wsl-zfs/build.sh, and the
+# build asserts the resulting kernel release matches EXPECT_RELEASE.
+#
+# Slow (a full kernel build), so this does not run on every PR.
+name: wsl-zfs
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      kernel_tag:
+        description: 'microsoft/WSL2-Linux-Kernel tag (e.g. linux-msft-wsl-6.6.87.2)'
+        required: false
+      expect_release:
+        description: 'Expected uname -r (e.g. 6.6.87.2-microsoft-standard-WSL2)'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ZFS for the WSL2 kernel
+        env:
+          KERNEL_TAG: ${{ inputs.kernel_tag }}
+          EXPECT_RELEASE: ${{ inputs.expect_release }}
+        run: |
+          # Empty inputs must fall back to the pins in build.sh, not override
+          # them with "".
+          [ -n "$KERNEL_TAG" ]     || unset KERNEL_TAG
+          [ -n "$EXPECT_RELEASE" ] || unset EXPECT_RELEASE
+          make wsl-zfs
+
+      - name: Summarize
+        run: |
+          echo "kernel release: $(cat dist/vectoradb-zfs.release)"
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vectoradb-zfs
+          path: |
+            dist/vectoradb-zfs-*.tar.gz
+            dist/vectoradb-zfs.release
+
+      # On a tag, attach the bundle to the release so install.ps1 can fetch it.
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/vectoradb-zfs-*.tar.gz dist/vectoradb-zfs.release --clobber
