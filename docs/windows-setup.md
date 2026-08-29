@@ -13,9 +13,19 @@ forwards every engine command into that distro, so day to day you just type `vdb
 
 ## Install
 
+Run these **in PowerShell**, not Command Prompt — `irm` and `iex` are PowerShell commands (`irm` is
+the alias for `Invoke-RestMethod`). In cmd.exe you get `irm is not recognized`.
+
 ```powershell
 irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
 vdb setup
+```
+
+If PowerShell blocks the script (`running scripts is disabled on this system`), allow it for this
+session first, then re-run the install:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
 `install.ps1` places `vdb.exe` in `%LOCALAPPDATA%\Programs\vectoradb` (added to your PATH) and stages
@@ -59,6 +69,8 @@ for this WSL kernel" message rather than a module that silently refuses to load.
 
 | Symptom | Fix |
 | --- | --- |
+| `irm is not recognized` / `iex is not recognized` | You're in Command Prompt. Open **PowerShell** and run the install command there. |
+| `running scripts is disabled on this system` | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, then re-run the install. |
 | `WSL is not installed` | Run `wsl --install` in an **Administrator** PowerShell, reboot, retry. |
 | `WSL is present but not healthy` | Enable virtualization in the BIOS and the *Virtual Machine Platform* feature; `wsl --update`. |
 | `no ZFS bundle for this WSL kernel (…)` | Your WSL kernel is newer than this VectoraDB release. Update VectoraDB, or build the bundle yourself (below). Do **not** `wsl --update` — that moves the kernel further ahead. |
