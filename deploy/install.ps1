@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 #
 # VectoraDB Windows installer. Installs the native launcher (vdb.exe) plus the
 # support assets `vdb setup` needs to build the WSL2 engine: the Linux engine
