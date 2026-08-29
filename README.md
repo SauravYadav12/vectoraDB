@@ -67,12 +67,21 @@ sudo vdb start
 ```
 
 **Windows** — runs the engine in a dedicated [WSL2](https://learn.microsoft.com/windows/wsl/) distro
-(the Windows analog of the macOS VM). Needs Windows 10 21H2+/11 with WSL2 and virtualization enabled:
+(the Windows analog of the macOS VM). Needs Windows 10 21H2+/11 with virtualization enabled and
+**WSL2 with a Linux distribution installed**: run `wsl --install` in an **Administrator PowerShell**,
+reboot, then confirm `wsl -l -v` lists a distro — if it doesn't, run `wsl --install -d Ubuntu`. (The
+installer needs a working distro to detect the WSL kernel for the ZFS module.) Then, **in PowerShell**
+(not Command Prompt — `irm`/`iex` are PowerShell commands):
 
 ```powershell
 irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
 vdb setup
 ```
+
+Open a **new** terminal afterwards so `vdb` is on your PATH. On Windows PowerShell 5.1, if a download
+aborts (*"the connection was closed unexpectedly"*), prefix the install with
+`[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12`. Full prerequisites,
+step-by-step, and troubleshooting: **[docs/windows-setup.md](docs/windows-setup.md)**.
 
 `vdb setup` creates the WSL2 distro, installs Docker + ZFS into it, and brings the stack up — then
 every command is just `vdb …`, forwarded into WSL2 transparently. Your kernel and `.wslconfig` are
