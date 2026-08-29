@@ -27,7 +27,7 @@ export default function Docs() {
       <table>
         <thead><tr><th>Command</th><th>What it does</th></tr></thead>
         <tbody>
-          <tr><td><code>vdb setup</code></td><td>One-time (macOS): create/start the local VM and bring everything up</td></tr>
+          <tr><td><code>vdb setup</code></td><td>One-time (macOS / Windows): create/start the local VM (WSL2 on Windows) and bring everything up</td></tr>
           <tr><td><code>vdb start</code> · <code>vdb stop</code></td><td>Start / stop the whole stack in the background</td></tr>
           <tr><td><code>vdb status</code></td><td>Servers, primary readiness, and branches</td></tr>
           <tr><td><code>vdb logs [gateway|api]</code></td><td>Print a background server's log</td></tr>
