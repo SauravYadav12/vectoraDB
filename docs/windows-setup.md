@@ -7,9 +7,34 @@ forwards every engine command into that distro, so day to day you just type `vdb
 ## Prerequisites
 
 - **Windows 10 (21H2+) or Windows 11**
-- **WSL2** enabled: in an Administrator PowerShell, `wsl --install` (reboot when prompted)
 - **Virtualization** enabled in the BIOS/UEFI and the *Virtual Machine Platform* Windows feature on
   (both are turned on by `wsl --install`)
+- **WSL2 with a Linux distribution actually installed.** In an **Administrator PowerShell**:
+
+  ```powershell
+  wsl --install            # enables WSL2 and installs Ubuntu by default; reboot when prompted
+  ```
+
+  On some machines `wsl --install` enables the feature but installs **no** distribution. The
+  VectoraDB installer needs a working distro to read the WSL kernel version (so it can stage the
+  matching ZFS module bundle), so confirm one is registered before installing VectoraDB:
+
+  ```powershell
+  wsl --list --verbose     # expect at least one distro listed (state Running or Stopped)
+  ```
+
+  If the list is empty — or `wsl -e uname -r` prints *"Windows Subsystem for Linux has no installed
+  distributions"* — install one explicitly and reboot:
+
+  ```powershell
+  wsl --install -d Ubuntu
+  ```
+
+  Then confirm WSL runs and note the kernel (VectoraDB ships the ZFS module for exactly this version):
+
+  ```powershell
+  wsl -e uname -r          # e.g. 6.6.87.2-microsoft-standard-WSL2
+  ```
 
 ## Install
 
@@ -27,6 +52,18 @@ session first, then re-run the install:
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
+
+On **Windows PowerShell 5.1** (the built-in *Windows PowerShell*, not PowerShell 7), release-asset
+downloads sometimes fail with *"The request was aborted: The connection was closed unexpectedly."*
+Force TLS 1.2 for the session, then re-run the install in the same window:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
+```
+
+After install, **open a new terminal** before running `vdb` — the installer adds it to your PATH,
+and PATH changes only apply to new sessions (`vdb is not recognized` otherwise).
 
 `install.ps1` places `vdb.exe` in `%LOCALAPPDATA%\Programs\vectoradb` (added to your PATH) and stages
 what `vdb setup` needs: the Linux engine binary, an Ubuntu rootfs, the Postgres image build context,
@@ -70,7 +107,11 @@ for this WSL kernel" message rather than a module that silently refuses to load.
 | Symptom | Fix |
 | --- | --- |
 | `irm is not recognized` / `iex is not recognized` | You're in Command Prompt. Open **PowerShell** and run the install command there. |
+| `The term '# ' is not recognized` at line 1 | Harmless — an older cached `install.ps1` had a UTF-8 BOM, so PowerShell ran the first comment as a command. The install still completes; ignore it, or re-run to fetch the fixed copy. |
 | `running scripts is disabled on this system` | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, then re-run the install. |
+| `The request was aborted: The connection was closed unexpectedly` | Windows PowerShell 5.1 didn't negotiate TLS 1.2. Run `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12` in the same window, then re-run the install. |
+| `vdb is not recognized` after install | Open a **new** terminal (PATH changes apply to new sessions). To use it in the current window: `$env:Path += ";$env:LOCALAPPDATA\Programs\vectoradb"`. |
+| `Staging ZFS…` prints a garbled bundle name / *"…has no installed distributions…"* | WSL has no Linux distro, so the installer can't read the kernel to pick the ZFS bundle. Install one (`wsl --install -d Ubuntu`, reboot), then re-run `install.ps1`. |
 | `WSL is not installed` | Run `wsl --install` in an **Administrator** PowerShell, reboot, retry. |
 | `WSL is present but not healthy` | Enable virtualization in the BIOS and the *Virtual Machine Platform* feature; `wsl --update`. |
 | `no ZFS bundle for this WSL kernel (…)` | Your WSL kernel is newer than this VectoraDB release. Update VectoraDB, or build the bundle yourself (below). Do **not** `wsl --update` — that moves the kernel further ahead. |
