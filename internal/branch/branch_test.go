@@ -2,7 +2,10 @@
 
 package branch
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParsePublishedPort(t *testing.T) {
 	cases := []struct {
@@ -32,10 +35,12 @@ func TestParsePublishedPort(t *testing.T) {
 }
 
 func TestDSN(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate the generated secrets file from the dev's home
 	got := dsn("12345")
-	want := "postgresql://vectoradb:vectoradb@127.0.0.1:12345/vectoradb"
-	if got != want {
-		t.Errorf("dsn = %q, want %q", got, want)
+	// The password is a per-install secret, so assert the shape, not the value.
+	if !strings.HasPrefix(got, "postgresql://vectoradb:") ||
+		!strings.HasSuffix(got, "@127.0.0.1:12345/vectoradb") {
+		t.Errorf("dsn = %q, want postgresql://vectoradb:<pw>@127.0.0.1:12345/vectoradb", got)
 	}
 }
 

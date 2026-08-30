@@ -17,13 +17,16 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/pbkdf2"
+
+	"github.com/vectoradb/vectoradb/internal/secrets"
 )
 
-// backendPassword is the Postgres role password baked into every branch image.
-// The Gateway authenticates the client with an API key, then logs in to the
-// backend on their behalf using this — so the real DB password never leaves the
-// Gateway and clients only ever present their key.
-const backendPassword = "vectoradb"
+// backendPassword is the Postgres role password for every branch. It is the
+// per-install secret (internal/secrets) that the engine also sets on the
+// containers — not a hardcoded default. The Gateway authenticates the client
+// with an API key, then logs in to the backend on their behalf using this, so
+// the real DB password never leaves the Gateway and clients only present a key.
+func backendPassword() string { return secrets.Load().PGPassword }
 
 // --- low-level message framing (post-startup Postgres protocol) ---
 
@@ -102,19 +105,19 @@ func backendAuth(backend net.Conn, params map[string]string) error {
 		case 0: // AuthenticationOk
 			return nil
 		case 3: // cleartext password
-			if err := writeMsg(backend, 'p', append([]byte(backendPassword), 0)); err != nil {
+			if err := writeMsg(backend, 'p', append([]byte(backendPassword()), 0)); err != nil {
 				return err
 			}
 		case 5: // md5 password
 			if len(body) < 8 {
 				return fmt.Errorf("short md5 auth message")
 			}
-			token := md5Password(params["user"], backendPassword, body[4:8])
+			token := md5Password(params["user"], backendPassword(), body[4:8])
 			if err := writeMsg(backend, 'p', append([]byte(token), 0)); err != nil {
 				return err
 			}
 		case 10: // SASL (SCRAM-SHA-256)
-			if err := scramSHA256(backend, body[4:], backendPassword); err != nil {
+			if err := scramSHA256(backend, body[4:], backendPassword()); err != nil {
 				return err
 			}
 		default:

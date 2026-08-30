@@ -132,8 +132,8 @@ func main() {
 		}
 		fmt.Println("  control API  http://localhost:8080/api/status")
 		fmt.Println("  agent API    http://localhost:8088   (POST /agents/{id}/branch)")
-		fmt.Println("  gateway(SQL) postgres://vectoradb:vectoradb@localhost:6432/<branch>")
-		fmt.Println("  storage      http://localhost:9001   (minioadmin/minioadmin)")
+		fmt.Println("  gateway(SQL) postgres://vectoradb:<API_KEY>@localhost:6432/<branch>?sslmode=require")
+		fmt.Println("  storage      http://localhost:9001   (console login in ~/.vectoradb/secrets.json)")
 		if web.FS() == nil {
 			fmt.Println("\nThe web UI isn't embedded in this build — run it with:  make web-dev   (http://localhost:5173)")
 		}
