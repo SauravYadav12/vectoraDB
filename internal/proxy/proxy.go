@@ -9,6 +9,7 @@ package proxy
 import (
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -70,7 +71,91 @@ const (
 	codeStartup30 = 196608   // protocol 3.0 StartupMessage
 	codeSSL       = 80877103 // SSLRequest
 	codeGSS       = 80877104 // GSSENCRequest
+	codeCancel    = 80877102 // CancelRequest
 )
+
+// errHandledCancel signals that readStartup already handled a CancelRequest, so
+// handle() should just return without logging or opening a session.
+var errHandledCancel = errors.New("cancel request handled")
+
+// cancelTargets maps a backend's key (pid:secret, as the client learned it from
+// the backend's BackendKeyData) to the backend address, so a CancelRequest — which
+// arrives on a fresh connection carrying only that key — can be forwarded to the
+// right branch. Registered when a session starts, removed when it ends.
+var (
+	cancelMu      sync.Mutex
+	cancelTargets = map[string]string{}
+)
+
+func cancelKey(pid, secret uint32) string {
+	return fmt.Sprintf("%d:%d", pid, secret)
+}
+
+func registerCancel(key, addr string) {
+	cancelMu.Lock()
+	cancelTargets[key] = addr
+	cancelMu.Unlock()
+}
+
+func deregisterCancel(key string) {
+	cancelMu.Lock()
+	delete(cancelTargets, key)
+	cancelMu.Unlock()
+}
+
+// forwardCancel relays a client's CancelRequest to the backend that owns the key.
+// body is the CancelRequest packet body: code(4), pid(4), secret(4).
+func forwardCancel(body []byte) {
+	if len(body) < 12 {
+		return
+	}
+	key := cancelKey(binary.BigEndian.Uint32(body[4:8]), binary.BigEndian.Uint32(body[8:12]))
+	cancelMu.Lock()
+	addr := cancelTargets[key]
+	cancelMu.Unlock()
+	if addr == "" {
+		return // unknown/expired key
+	}
+	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	// A CancelRequest is length(4)=16, code, pid, secret — the same pid/secret.
+	pkt := make([]byte, 16)
+	binary.BigEndian.PutUint32(pkt[0:], 16)
+	binary.BigEndian.PutUint32(pkt[4:], codeCancel)
+	copy(pkt[8:], body[4:12])
+	_, _ = c.Write(pkt)
+}
+
+// relayStartupCaptureKey forwards backend->client messages after authentication
+// (ParameterStatus, BackendKeyData, ReadyForQuery), capturing the BackendKeyData
+// so a later CancelRequest can be routed, and returns the captured key (or "")
+// once ReadyForQuery is seen. After it returns, the session is a raw pipe.
+func relayStartupCaptureKey(client, backend net.Conn, addr string) (string, error) {
+	var key string
+	for {
+		typ, body, err := readMsg(backend)
+		if err != nil {
+			return key, err
+		}
+		if err := writeMsg(client, typ, body); err != nil {
+			return key, err
+		}
+		switch typ {
+		case 'K': // BackendKeyData: pid(4), secret(4)
+			if len(body) >= 8 {
+				key = cancelKey(binary.BigEndian.Uint32(body[0:4]), binary.BigEndian.Uint32(body[4:8]))
+				registerCancel(key, addr)
+			}
+		case 'Z': // ReadyForQuery — startup complete
+			return key, nil
+		case 'E': // ErrorResponse during startup
+			return key, fmt.Errorf("backend error during startup")
+		}
+	}
+}
 
 // Serve listens on addr (e.g. ":6432") and proxies Postgres connections,
 // auto-resuming suspended branches on connect and auto-suspending branches idle
@@ -118,7 +203,9 @@ func handle(client net.Conn) {
 	// use for the rest of the session (Go passes net.Conn by value).
 	client, params, err := readStartup(client)
 	if err != nil {
-		log.Printf("startup: %v", err)
+		if !errors.Is(err, errHandledCancel) {
+			log.Printf("startup: %v", err)
+		}
 		return
 	}
 
@@ -180,6 +267,17 @@ func handle(client net.Conn) {
 	}
 	log.Printf("routed: dbname=%s -> %s", target, addr)
 
+	// Relay the startup tail (ParameterStatus, BackendKeyData, ReadyForQuery),
+	// capturing the backend key so a later CancelRequest from this client can be
+	// routed to this branch. After ReadyForQuery it's a raw pipe.
+	key, err := relayStartupCaptureKey(client, backend, addr)
+	if err != nil {
+		return
+	}
+	if key != "" {
+		defer deregisterCancel(key)
+	}
+
 	done := make(chan struct{}, 2)
 	go func() { _, _ = io.Copy(backend, client); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(client, backend); done <- struct{}{} }()
@@ -228,6 +326,11 @@ func readStartup(client net.Conn) (net.Conn, map[string]string, error) {
 				return client, nil, err
 			}
 			continue
+		case codeCancel:
+			// A cancel is a fresh, session-less connection carrying only a backend
+			// key. Forward it to that backend and we're done (restores Ctrl-C).
+			forwardCancel(body)
+			return client, nil, errHandledCancel
 		case codeStartup30:
 			return client, parseParams(body[4:]), nil
 		default:

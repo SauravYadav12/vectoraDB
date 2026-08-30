@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -150,6 +151,28 @@ func testTLSConfig(t *testing.T) *tls.Config {
 		t.Fatal(err)
 	}
 	return &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
+}
+
+// A CancelRequest is recognized in the startup phase and handled (forwarded to
+// the owning backend), so handle() returns without opening a session.
+func TestReadStartupHandlesCancel(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+
+	go func() {
+		pkt := make([]byte, 16)
+		binary.BigEndian.PutUint32(pkt[0:], 16)
+		binary.BigEndian.PutUint32(pkt[4:], codeCancel)
+		binary.BigEndian.PutUint32(pkt[8:], 12345)  // pid
+		binary.BigEndian.PutUint32(pkt[12:], 67890) // secret (unknown key -> no-op)
+		_, _ = client.Write(pkt)
+	}()
+
+	_ = server.SetDeadline(time.Now().Add(3 * time.Second))
+	_, _, err := readStartup(server)
+	if !errors.Is(err, errHandledCancel) {
+		t.Fatalf("expected errHandledCancel for a CancelRequest, got %v", err)
+	}
 }
 
 func TestSendError(t *testing.T) {
