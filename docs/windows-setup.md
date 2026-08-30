@@ -18,7 +18,7 @@ One command, **in PowerShell** — not Command Prompt. `irm` and `iex` are Power
 is the alias for `Invoke-RestMethod`); in cmd.exe you get `irm is not recognized`.
 
 ```powershell
-irm https://sauravyadav12.github.io/vectoraDB/install | iex
+irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
 ```
 
 It does the whole job:
@@ -82,13 +82,11 @@ for this WSL kernel" message rather than a module that silently refuses to load.
 | The install stops asking you to restart | Enabling the WSL components needs a reboot. Restart; the installer resumes on its own. If it doesn't, run the one-liner again. |
 | `no ZFS bundle published for this WSL kernel` | Your WSL kernel is newer than any this VectoraDB release ships a module for. Check for a newer VectoraDB release, or build one with `make wsl-zfs`. Do **not** `wsl --update` — that moves the kernel further ahead. |
 | `WSL is present but not healthy` | Enable virtualization in the BIOS and the *Virtual Machine Platform* feature; `wsl --update`. |
-| `no ZFS bundle for this WSL kernel (…)` | Your WSL kernel is newer than this VectoraDB release. Update VectoraDB, or build the bundle yourself (below). Do **not** `wsl --update` — that moves the kernel further ahead. |
 | `ZFS is not usable in the "vectoradb" distro` | The staged modules were built for a different kernel. Check `wsl -d vectoradb -- uname -r` against the bundle filename in `%LOCALAPPDATA%\Programs\vectoradb`. |
 | `systemd did not finish booting` | `wsl --terminate vectoradb`, then re-run `vdb setup`. |
 | `the VectoraDB ZFS pool device is not ready` | Deliberate stop: the pool could not be imported, and VectoraDB will not run the engine in case it recreates the pool over your data. Run `wsl --terminate vectoradb` and retry; if it persists, see `journalctl -u vectoradb-zpool.service` inside the distro. |
 | `pool I/O is currently suspended` | The pool lost its backing device. `wsl --terminate vectoradb` and re-run `vdb setup`; the pool is re-imported at boot. |
 | `wsl` commands hang and `wsl --shutdown` never returns | A suspended ZFS pool can wedge the WSL VM. In an **Administrator** PowerShell: `Restart-Service WSLService -Force` (a reboot also clears it). |
-| `vdb` not found after install | Open a **new** terminal (PATH updates apply to new sessions). |
 
 ## Uninstall
 

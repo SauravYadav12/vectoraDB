@@ -70,7 +70,7 @@ sudo vdb start
 commands). Needs Windows 10 21H2+/11 with virtualization enabled; everything else is handled for you:
 
 ```powershell
-irm https://sauravyadav12.github.io/vectoraDB/install | iex
+irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
 ```
 
 That installs WSL if you don't have it (no Linux distribution needed — VectoraDB brings its own),

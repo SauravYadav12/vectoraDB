@@ -57,8 +57,17 @@ jobs:
           gh release view "$TAG" >/dev/null 2>&1 ||
             gh release create "$TAG" --prerelease --generate-notes --title "$TAG"
 
+      # Published so the installer can verify what it downloads. Without it the
+      # only integrity guarantee is TLS, and these assets are executed as root
+      # inside the user's distro.
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum vdb-* vectoradb-docker-context.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Attach binaries
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
-        run: gh release upload "$TAG" dist/vdb-* dist/vectoradb-docker-context.tar.gz --clobber
+        run: gh release upload "$TAG" dist/vdb-* dist/vectoradb-docker-context.tar.gz dist/SHA256SUMS --clobber

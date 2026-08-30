@@ -5,7 +5,7 @@
 # installs the vdb launcher, and runs `vdb setup`.
 #
 # Usage (PowerShell):
-#   irm https://sauravyadav12.github.io/vectoraDB/install | iex
+#   irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
 #
 # This file must stay free of a UTF-8 BOM: `irm | iex` pipes the BOM into the
 # parser, which then reports `The term '# ' is not recognized` on line 1.
@@ -90,7 +90,7 @@ function Test-RebootPending {
 # machine that needed WSL enabled finishes on its own. It is a convenience, never
 # the only path: re-running the one-liner by hand always works.
 function Register-Resume {
-    $cmd = "irm https://sauravyadav12.github.io/vectoraDB/install | iex"
+    $cmd = "irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex"
     $run = "powershell -NoExit -NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
     try {
         New-ItemProperty -Force -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce' `

@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Builds the prebuilt VectoraDB WSL2 distro image and attaches it to the release.
+#
+# The image carries everything that does not depend on the WSL kernel: Docker,
+# the ZFS userland, the engine binary, and the container images. `vdb setup` then
+# imports it, adds the ~2 MB kernel-matched ZFS modules, and starts -- instead of
+# running apt, a docker build and three registry pulls on the user's machine.
+name: wsl-distro
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach to (e.g. v0.5.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      # The image bakes in the engine binary and the ZFS userland, so both must
+      # exist before it is assembled.
+      - name: Build the engine binaries
+        run: make release VERSION="${TAG#v}"
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+
+      - name: Build ZFS (modules + userland)
+        run: make wsl-zfs
+
+      - name: Build the distro image
+        run: make wsl-distro
+
+      - name: Summarize
+        run: |
+          echo "kernel release: $(cat dist/vectoradb-zfs.release)"
+          ls -la dist/
+
+      # Appended rather than replaced: release.yml publishes SHA256SUMS for the
+      # binaries, and this job adds the assets it built. Both are needed for the
+      # installer and `vdb setup` to verify everything they download.
+      - name: Checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          cd dist
+          gh release download "$TAG" -p SHA256SUMS -O existing.txt 2>/dev/null || : > existing.txt
+          sha256sum vectoradb-distro.tar.gz vectoradb-zfs-modules-*.tar.gz > mine.txt
+          # Keep one line per asset, preferring the freshly built ones.
+          awk '{print $2}' mine.txt > names.txt
+          grep -vFf names.txt existing.txt > SHA256SUMS || : > SHA256SUMS
+          cat mine.txt >> SHA256SUMS
+          sort -k2 -o SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --prerelease --generate-notes --title "$TAG"
+          gh release upload "$TAG" \
+            dist/vectoradb-distro.tar.gz \
+            dist/vectoradb-zfs-modules-*.tar.gz \
+            dist/vectoradb-zfs.release \
+            dist/SHA256SUMS --clobber

@@ -5,7 +5,10 @@
 package host
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -623,7 +626,9 @@ func writeFileB64(path, content string) string {
 // supplied by interop.
 func installDocker(name string) error {
 	if wslRoot(name, "test -x /usr/bin/dockerd") == nil {
-		// Still ensure it is running: WSL starts distros with nothing up.
+		// Already present — either a previous setup installed it, or it came
+		// baked into the prebuilt distro image. Still ensure it is running: WSL
+		// starts distros with nothing up.
 		return wslRoot(name, "systemctl enable --now docker")
 	}
 	step("Installing Docker in the WSL distro")
@@ -675,7 +680,13 @@ func installZFS(name string) error {
 	if wslRoot(name, guestPath+"; modprobe zfs 2>/dev/null && zfs version >/dev/null 2>&1") == nil {
 		return nil
 	}
+	// A release from before the modules/userland split ships one combined
+	// bundle; prefer the split one but accept either, so a pinned vdb.exe keeps
+	// working against its own release.
 	bundle := bundledAsset(zfsBundleName(rel))
+	if bundle == "" {
+		bundle = bundledAsset(legacyZFSBundleName(rel))
+	}
 	if bundle == "" {
 		// Not staged: fetch the one this kernel needs. This is the first moment
 		// the right file is knowable — the installer runs before WSL may even
@@ -723,18 +734,89 @@ func installZFS(name string) error {
 // left under the real name would be found by bundledAsset next time and fail as
 // a corrupt archive, which is a far more confusing error than a missing file.
 func fetchZFSBundle(kernelRelease string) (string, error) {
-	asset := zfsBundleName(kernelRelease)
-	url := releaseAssetURL(vectoradbRepo, version.Version, asset)
-	dst := filepath.Join(installDir(), asset)
-
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	if err := os.MkdirAll(installDir(), 0o755); err != nil {
 		return "", err
 	}
 	step("Downloading ZFS for kernel " + kernelRelease)
-	if err := downloadResumable(url, dst, asset); err != nil {
+
+	// Try the split module bundle first, then the combined one. Which exists
+	// depends on the release this binary was stamped for, and a 404 on the first
+	// is the normal case against an older release rather than an error.
+	var lastErr error
+	for _, asset := range []string{zfsBundleName(kernelRelease), legacyZFSBundleName(kernelRelease)} {
+		url := releaseAssetURL(vectoradbRepo, version.Version, asset)
+		dst := filepath.Join(installDir(), asset)
+		err := downloadResumable(url, dst, asset)
+		if err == nil {
+			if err := verifyReleaseAsset(dst, asset); err != nil {
+				os.Remove(dst)
+				return "", err
+			}
+			return dst, nil
+		}
+		if !errors.Is(err, errAssetNotFound) {
+			return "", err
+		}
+		lastErr = err
+		logf("no %s in this release, trying the next name\n", asset)
+	}
+	return "", fmt.Errorf("no ZFS module bundle published for this WSL kernel (%s).\n"+
+		"VectoraDB ships the ZFS module built for one exact kernel, and yours is not among them.\n"+
+		"Check for a newer VectoraDB release, or build it yourself with `make wsl-zfs`.\n"+
+		"  (%v)", kernelRelease, lastErr)
+}
+
+// verifyReleaseAsset checks a downloaded asset against the release's SHA256SUMS.
+//
+// The bundle is unpacked into the distro and its modules are loaded into the
+// kernel, so "it came over TLS" is not on its own a good enough answer to what
+// this file is. A release with no SHA256SUMS is not a failure — releases predate
+// the file — but a listed asset whose hash disagrees is.
+func verifyReleaseAsset(path, asset string) error {
+	want, err := releaseChecksum(asset)
+	if err != nil {
+		logf("checksum lookup for %s skipped: %v\n", asset, err)
+		return nil
+	}
+	if want == "" {
+		logf("%s is not listed in SHA256SUMS; skipping verification\n", asset)
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("checksum mismatch for %s\n  expected %s\n  got      %s\n"+
+			"The download does not match what this VectoraDB release published. "+
+			"It was discarded; re-run `vdb setup` to try again", asset, want, got)
+	}
+	logf("checksum OK for %s\n", asset)
+	return nil
+}
+
+// releaseChecksum returns the expected SHA256 for an asset, or "" when the
+// release lists no such file.
+func releaseChecksum(asset string) (string, error) {
+	resp, err := http.Get(releaseAssetURL(vectoradbRepo, version.Version, "SHA256SUMS"))
+	if err != nil {
 		return "", err
 	}
-	return dst, nil
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("SHA256SUMS: %s", resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	return checksumFor(string(body), asset), nil
 }
 
 // downloadResumable fetches url to dst, resuming and retrying on a dropped
@@ -774,10 +856,7 @@ func downloadResumable(url, dst, asset string) error {
 		switch resp.StatusCode {
 		case http.StatusNotFound:
 			resp.Body.Close()
-			return fmt.Errorf("no ZFS bundle published for this WSL kernel.\n"+
-				"VectoraDB ships the ZFS module built for one exact kernel, and yours is not among them.\n"+
-				"Check for a newer VectoraDB release, or build it yourself with `make wsl-zfs`.\n"+
-				"  looked for: %s", url)
+			return fmt.Errorf("%w: %s", errAssetNotFound, url)
 		case http.StatusOK:
 			// The server ignored our Range (or we had nothing): start over.
 			have = 0
@@ -846,10 +925,14 @@ func verifyZFS(name string) error {
 // finds nothing for a user who installed vdb rather than cloning the repo; the
 // forwarded environment points VECTORADB_IMAGE_CONTEXT here instead.
 func stageImageContext(name string) error {
+	// The prebuilt distro image already carries the context (and the built
+	// image), so there is nothing to stage.
+	if wslRoot(name, fmt.Sprintf("test -f %q/Dockerfile", guestImageContext)) == nil {
+		return nil
+	}
 	src := bundledDir("docker-context")
 	if src == "" {
-		fmt.Println("Note: no bundled docker build context found — `vdb start` will look for " +
-			"docker/postgres relative to the current directory.")
+		logf("no bundled docker build context; vdb start will look relative to the working directory\n")
 		return nil
 	}
 	step("Staging the Postgres image build context")
@@ -879,6 +962,10 @@ func installGuestBinaryWSL(name string) error {
 
 // vectoradbRepo is where setup fetches assets the installer did not stage.
 const vectoradbRepo = "SauravYadav12/vectoraDB"
+
+// errAssetNotFound distinguishes "this release has no such asset" from a real
+// download failure, so callers can try an alternative name rather than give up.
+var errAssetNotFound = errors.New("release asset not found")
 
 // installDir is the directory holding vdb.exe — where the installer stages
 // assets and where setup caches anything it downloads.
@@ -930,11 +1017,21 @@ func bundledDir(basename string) string {
 
 // bundledRootfs finds the Ubuntu rootfs tarball, which install.ps1 fetches and
 // which `wsl --import` accepts gzipped or plain.
+// The prebuilt image comes first: it already contains Docker, the ZFS userland,
+// the engine and the container images, so importing it skips an apt install, a
+// docker build and three registry pulls. A plain Ubuntu rootfs still works, and
+// setup does that extra work itself.
 func bundledRootfs() string {
-	for _, n := range []string{"vectoradb-rootfs.tar.gz", "vectoradb-rootfs.tar"} {
+	for _, n := range []string{distroImageName, "vectoradb-rootfs.tar.gz", "vectoradb-rootfs.tar"} {
 		if p := bundledAsset(n); p != "" {
 			return p
 		}
 	}
 	return ""
+}
+
+// prebuiltDistro reports whether the imported distro came from our image, in
+// which case setup can skip what the image already did.
+func prebuiltDistro(name string) bool {
+	return wslRoot(name, "test -x /usr/bin/dockerd && test -x /usr/local/sbin/zpool") == nil
 }
