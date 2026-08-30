@@ -1,0 +1,17 @@
+{
+  "name": "@vectoradb/client",
+  "version": "0.6.0",
+  "description": "TypeScript client for VectoraDB — serverless Postgres with instant branching and a tamper-evident schema ledger.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc"
+  },
+  "repository": { "type": "git", "url": "https://github.com/vectoradb/vectoraDB" },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
