@@ -4,9 +4,16 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -57,7 +64,7 @@ func TestReadStartupSkipsSSL(t *testing.T) {
 	}()
 
 	_ = server.SetDeadline(time.Now().Add(3 * time.Second))
-	params, err := readStartup(server)
+	_, params, err := readStartup(server)
 	if err != nil {
 		t.Fatalf("readStartup: %v", err)
 	}
@@ -67,6 +74,82 @@ func TestReadStartupSkipsSSL(t *testing.T) {
 	if err := <-errc; err != nil {
 		t.Fatalf("client goroutine: %v", err)
 	}
+}
+
+// When TLS is configured, an SSLRequest is answered 'S', the connection is
+// upgraded, and the StartupMessage is read over the encrypted conn — the path
+// that lets sslmode=require clients connect.
+func TestReadStartupUpgradesTLS(t *testing.T) {
+	prev := tlsConfig
+	tlsConfig = testTLSConfig(t)
+	defer func() { tlsConfig = prev }()
+
+	client, server := net.Pipe()
+	defer client.Close()
+
+	errc := make(chan error, 1)
+	go func() {
+		ssl := make([]byte, 8)
+		binary.BigEndian.PutUint32(ssl[0:], 8)
+		binary.BigEndian.PutUint32(ssl[4:], codeSSL)
+		if _, err := client.Write(ssl); err != nil {
+			errc <- err
+			return
+		}
+		buf := make([]byte, 1)
+		if _, err := client.Read(buf); err != nil {
+			errc <- err
+			return
+		}
+		if buf[0] != 'S' {
+			errc <- fmt.Errorf("expected 'S' after SSLRequest with TLS enabled, got %q", buf[0])
+			return
+		}
+		tc := tls.Client(client, &tls.Config{InsecureSkipVerify: true})
+		if err := tc.Handshake(); err != nil {
+			errc <- fmt.Errorf("client handshake: %w", err)
+			return
+		}
+		_, err := tc.Write(buildStartup(map[string]string{"user": "u", "database": "qa"}))
+		errc <- err
+	}()
+
+	_ = server.SetDeadline(time.Now().Add(5 * time.Second))
+	upgraded, params, err := readStartup(server)
+	if err != nil {
+		t.Fatalf("readStartup: %v", err)
+	}
+	if _, ok := upgraded.(*tls.Conn); !ok {
+		t.Fatalf("expected returned conn to be *tls.Conn, got %T", upgraded)
+	}
+	if params["database"] != "qa" {
+		t.Fatalf("database = %q, want qa", params["database"])
+	}
+	if err := <-errc; err != nil {
+		t.Fatalf("client goroutine: %v", err)
+	}
+}
+
+// testTLSConfig builds an in-memory self-signed server config for the TLS path.
+func testTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
 }
 
 func TestSendError(t *testing.T) {

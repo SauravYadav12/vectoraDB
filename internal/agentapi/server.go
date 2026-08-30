@@ -19,6 +19,7 @@ import (
 
 	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
+	"github.com/vectoradb/vectoradb/internal/tlsutil"
 )
 
 // Serve starts the Agent Branch API on addr (e.g. ":8088").
@@ -66,8 +67,14 @@ func Serve(addr string) error {
 	mux.Handle("/agents", protected)
 	mux.Handle("/agents/", protected)
 
-	log.Printf("agent branch API listening on %s (auth on)", addr)
-	return http.ListenAndServe(addr, cors(store.WebOrigin())(logging(mux)))
+	handler := cors(store.WebOrigin())(logging(mux))
+	cert, key, tlsErr := tlsutil.EnsureCert()
+	if tlsErr != nil {
+		log.Printf("agent branch API on %s (auth on; TLS disabled: %v)", addr, tlsErr)
+		return http.ListenAndServe(addr, handler)
+	}
+	log.Printf("agent branch API on %s (auth on; TLS)", addr)
+	return http.ListenAndServeTLS(addr, cert, key, handler)
 }
 
 func cors(origin string) func(http.Handler) http.Handler {

@@ -23,6 +23,7 @@ import (
 	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
 	"github.com/vectoradb/vectoradb/internal/daemon"
+	"github.com/vectoradb/vectoradb/internal/tlsutil"
 	"github.com/vectoradb/vectoradb/web"
 )
 
@@ -44,15 +45,28 @@ func Serve(addr string) error {
 	store.MountKeys(api)          // /api/keys (protected via Authn below)
 	mux.Handle("/api/", store.Authn(api))
 
-	// Serve the web UI from the same origin when it's embedded in the binary
-	// (release builds, -tags embedui), so `vdb start` serves everything.
-	if ui := web.FS(); ui != nil {
-		serveUI(mux, ui)
-		log.Printf("web UI served at http://localhost%s/", addr)
+	handler := cors(store.WebOrigin())(logging(mux))
+
+	// TLS when a certificate is available (self-signed on first run, or a real
+	// one via VECTORADB_TLS_CERT/KEY), so API keys and session tokens are never
+	// sent in cleartext. Falls back to HTTP only if the cert can't be loaded.
+	scheme := "https"
+	cert, key, tlsErr := tlsutil.EnsureCert()
+	if tlsErr != nil {
+		scheme = "http"
+		log.Printf("control-plane TLS disabled (%v) — serving plain HTTP", tlsErr)
 	}
 
-	log.Printf("control-plane API on %s (auth on; UI origin %s)", addr, store.WebOrigin())
-	return http.ListenAndServe(addr, cors(store.WebOrigin())(logging(mux)))
+	if ui := web.FS(); ui != nil {
+		serveUI(mux, ui)
+		log.Printf("web UI served at %s://localhost%s/", scheme, addr)
+	}
+
+	log.Printf("control-plane API on %s://localhost%s (auth on; UI origin %s)", scheme, addr, store.WebOrigin())
+	if tlsErr != nil {
+		return http.ListenAndServe(addr, handler)
+	}
+	return http.ListenAndServeTLS(addr, cert, key, handler)
 }
 
 func registerAPI(mux *http.ServeMux) {
