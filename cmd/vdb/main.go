@@ -348,6 +348,14 @@ func ledgerCmd(args []string) {
 		must(branch.Restore(ts))
 		return
 	}
+	if len(args) > 0 && args[0] == "verify" {
+		name := "main"
+		if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+			name = args[1]
+		}
+		must(branch.LedgerVerify(name))
+		return
+	}
 	name, limit := "main", 50
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--limit" && i+1 < len(args) {

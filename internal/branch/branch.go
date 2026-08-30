@@ -247,6 +247,54 @@ func Ledger(name string, limit int) error {
 		"psql", "-U", pgUser, "-d", pgDatabase, "-P", "pager=off", "-c", q)
 }
 
+// ledgerVerifySQL recomputes each row's hash from the previous row's and this
+// row's fields, and checks the chain linkage, returning:
+//
+//	legacy | chained | broken | first_broken_id
+//
+// LedgerVerifySQL is exported so the control-plane can run the same check.
+const LedgerVerifySQL = `WITH v AS (
+  SELECT id, prev_hash, row_hash, vdb._ledger_hash(s.*) AS recomputed,
+         lag(row_hash) OVER (ORDER BY id) AS prev_link
+  FROM vdb.schema_ledger s WHERE row_hash IS NOT NULL)
+SELECT (SELECT count(*) FROM vdb.schema_ledger WHERE row_hash IS NULL) AS legacy,
+       count(*) AS chained,
+       count(*) FILTER (WHERE row_hash <> recomputed OR prev_hash IS DISTINCT FROM coalesce(prev_link,'')) AS broken,
+       coalesce(min(id) FILTER (WHERE row_hash <> recomputed OR prev_hash IS DISTINCT FROM coalesce(prev_link,''))::text,'') AS first_broken
+FROM v`
+
+// LedgerVerify recomputes the ledger's hash chain and reports whether it is
+// intact. A broken chain means a row was deleted or edited after the fact.
+func LedgerVerify(name string) error {
+	if name == "" {
+		name = "main"
+	}
+	out, err := capture("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container(name),
+		"psql", "-U", pgUser, "-d", pgDatabase, "-tA", "-F", "|", "-c", LedgerVerifySQL)
+	if err != nil {
+		return fmt.Errorf("verify query: %w", err)
+	}
+	f := strings.Split(strings.TrimSpace(out), "|")
+	if len(f) < 3 {
+		return fmt.Errorf("unexpected verify output: %q", out)
+	}
+	legacy, chained, broken := f[0], f[1], f[2]
+	firstBroken := ""
+	if len(f) >= 4 {
+		firstBroken = f[3]
+	}
+	if broken != "0" {
+		return fmt.Errorf("ledger TAMPERED — %s of %s chained rows fail verification (first at id %s)",
+			broken, chained, firstBroken)
+	}
+	msg := fmt.Sprintf("ledger intact — %s rows hash-chained and verified", chained)
+	if legacy != "0" && legacy != "" {
+		msg += fmt.Sprintf("; %s earlier row(s) predate tamper-evidence and are unchained", legacy)
+	}
+	fmt.Println(msg)
+	return nil
+}
+
 // Create makes an instant copy-on-write branch of parent (default "main") and
 // starts a Postgres container serving it.
 func Create(name, parent string) error {

@@ -250,6 +250,17 @@ func registerAPI(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, runQuery(addr, ledgerSQL(r.URL.Query()), ""))
 	})
+
+	// Tamper-evidence: recompute the ledger's hash chain and report whether it
+	// is intact (columns: legacy, chained, broken, first_broken).
+	mux.HandleFunc("GET /api/branches/{name}/ledger/verify", func(w http.ResponseWriter, r *http.Request) {
+		addr, err := branch.EnsureRunning(r.PathValue("name"))
+		if err != nil {
+			writeErr(w, 404, err)
+			return
+		}
+		writeJSON(w, 200, runQuery(addr, branch.LedgerVerifySQL, ""))
+	})
 }
 
 func sqlEsc(s string) string { return strings.ReplaceAll(s, "'", "''") }
