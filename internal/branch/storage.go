@@ -240,9 +240,10 @@ func (b btrfsStorage) ensureReady() error {
 	if err := run("mkdir", "-p", btrfsMount); err != nil {
 		return err
 	}
-	// compress=zstd costs little and helps: branches hold Postgres data, and the
-	// image is a sparse file on someone's disk.
-	if err := run("mount", "-o", "loop,compress=zstd", btrfsImage, btrfsMount); err != nil {
+	// No compression: branch subvolumes are nodatacow (see disableCoW), which
+	// btrfs cannot compress anyway, and compressing a database write path costs
+	// CPU for little gain.
+	if err := run("mount", "-o", "loop", btrfsImage, btrfsMount); err != nil {
 		return fmt.Errorf("mounting the storage image: %w", err)
 	}
 	return nil
@@ -252,14 +253,46 @@ func (btrfsStorage) exists(branch string) bool {
 	return exec.Command("sudo", "btrfs", "subvolume", "show", btrfsSubvol(branch)).Run() == nil
 }
 
-func (btrfsStorage) createEmpty(branch string) error {
-	return run("btrfs", "subvolume", "create", btrfsSubvol(branch))
+func (b btrfsStorage) createEmpty(branch string) error {
+	if err := run("btrfs", "subvolume", "create", btrfsSubvol(branch)); err != nil {
+		return err
+	}
+	return b.disableCoW(branch)
 }
 
 // clone is a single snapshot: btrfs needs no separate snapshot object, so
 // there is nothing left behind to clean up when the branch is deleted.
-func (btrfsStorage) clone(src, dst string) error {
+//
+// The snapshot inherits nodatacow from its source, and files created in it
+// afterwards inherit it from the directory, so a branch performs like its
+// parent. The first write to an extent still shared with the parent is copied
+// once — that is what makes a branch a branch — and reverts to in-place after.
+func (b btrfsStorage) clone(src, dst string) error {
 	return run("btrfs", "subvolume", "snapshot", btrfsSubvol(src), btrfsSubvol(dst))
+}
+
+// disableCoW turns off copy-on-write for a branch's contents.
+//
+// This matters more than it sounds. Under CoW every random write into a
+// Postgres heap or index relocates an extent, so the data files fragment badly
+// and write throughput degrades as they age — the standard reason databases are
+// not run on plain btrfs. Setting the attribute on the empty subvolume makes
+// every file created inside it inherit nodatabase-cow, which keeps Postgres
+// writing in place, as it does on ext4 or ZFS.
+//
+// Snapshots keep working: btrfs still copies an extent the first time it is
+// written after being shared, which is exactly the branch semantics we want.
+//
+// The trade-off is that btrfs cannot checksum nodatacow extents. Postgres has
+// its own page checksums and its WAL, so the database remains able to detect
+// and recover from corruption on its own.
+func (btrfsStorage) disableCoW(branch string) error {
+	// Best effort: a filesystem that refuses the attribute still works, just
+	// with CoW's write amplification.
+	if err := run("chattr", "+C", btrfsSubvol(branch)); err != nil {
+		fmt.Printf("note: could not disable copy-on-write on %s; writes may be slower\n", branch)
+	}
+	return nil
 }
 
 func (btrfsStorage) destroy(branch string) error {

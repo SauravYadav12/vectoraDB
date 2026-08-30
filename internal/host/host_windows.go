@@ -440,9 +440,9 @@ fi
 # missing image is normal and not an error.
 [ -f "$IMG" ] || exit 0
 
-# compress=zstd: branches hold Postgres data and the image is a sparse file on
-# someone's disk, so this is close to free.
-mount -o loop,compress=zstd "$IMG" "$MNT"
+# No compression: branch subvolumes are nodatacow so btrfs cannot compress them
+# anyway, and compressing a database write path costs CPU for little gain.
+mount -o loop "$IMG" "$MNT"
 `
 
 const storageUnit = `[Unit]
