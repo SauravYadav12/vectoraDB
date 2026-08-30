@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/vectoradb/vectoradb/internal/auth"
@@ -22,11 +23,45 @@ import (
 	"github.com/vectoradb/vectoradb/internal/tlsutil"
 )
 
+// agentTTL is how long an agent branch may live before the reaper removes it
+// (VECTORADB_AGENT_TTL, e.g. "30m"; unset/0 disables reaping).
+func agentTTL() time.Duration {
+	if v := os.Getenv("VECTORADB_AGENT_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// reapLoop periodically deletes agent branches past their TTL, so abandoned
+// sandboxes don't accumulate and hold pool space.
+func reapLoop(ttl time.Duration) {
+	interval := ttl / 4
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	if interval > 15*time.Minute {
+		interval = 15 * time.Minute
+	}
+	for {
+		time.Sleep(interval)
+		if n, err := branch.ReapAgentBranches(ttl); err == nil && n > 0 {
+			log.Printf("reaped %d expired agent branch(es)", n)
+		}
+	}
+}
+
 // Serve starts the Agent Branch API on addr (e.g. ":8088").
 func Serve(addr string) error {
 	store, err := auth.OpenFromEnv()
 	if err != nil {
 		return err
+	}
+
+	if ttl := agentTTL(); ttl > 0 {
+		go reapLoop(ttl)
+		log.Printf("agent branch TTL enabled: reaping branches older than %s", ttl)
 	}
 
 	mux := http.NewServeMux()

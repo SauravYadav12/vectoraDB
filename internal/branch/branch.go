@@ -504,6 +504,13 @@ func parsePublishedPort(out string) (string, error) {
 // CreateAgentBranch gives agent id its own instant branch and returns how to
 // connect to it.
 func CreateAgentBranch(agentID string) (Info, error) {
+	// Cap concurrent agent branches so an agent loop can't exhaust the pool
+	// (each branch is a full Postgres). 0 disables the cap.
+	if max := agentMax(); max > 0 {
+		if existing, err := ListAgentBranches(); err == nil && len(existing) >= max {
+			return Info{}, fmt.Errorf("agent branch limit reached (%d) — delete some or raise VECTORADB_AGENT_MAX", max)
+		}
+	}
 	name := agentBranch(agentID)
 	if err := Create(name, "main"); err != nil {
 		return Info{}, err
@@ -725,6 +732,49 @@ func SuspendableBranches() ([]string, error) {
 		names = append(names, bn)
 	}
 	return names, nil
+}
+
+// agentMax is the maximum number of concurrent agent branches (default 50; 0
+// disables the cap). Set VECTORADB_AGENT_MAX to override.
+func agentMax() int {
+	if v := os.Getenv("VECTORADB_AGENT_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 50
+}
+
+// ReapAgentBranches deletes agent branches whose container is older than maxAge
+// (0 disables). Returns how many were reaped. Abandoned agent sandboxes would
+// otherwise accumulate and hold pool space forever.
+func ReapAgentBranches(maxAge time.Duration) (int, error) {
+	if maxAge <= 0 {
+		return 0, nil
+	}
+	out, err := capture("docker", "ps", "--filter", "name=vec-agent-", "--format", "{{.Names}}")
+	if err != nil {
+		return 0, err
+	}
+	reaped := 0
+	for _, cont := range strings.Fields(out) {
+		createdStr, err := capture("docker", "inspect", "-f", "{{.Created}}", cont)
+		if err != nil {
+			continue
+		}
+		created, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(createdStr))
+		if err != nil {
+			continue
+		}
+		if time.Since(created) <= maxAge {
+			continue
+		}
+		agentID := strings.TrimPrefix(strings.TrimPrefix(cont, "vec-"), "agent-")
+		if err := DeleteAgentBranch(agentID); err == nil {
+			reaped++
+		}
+	}
+	return reaped, nil
 }
 
 // ListAgentBranches lists all running agent branches.
