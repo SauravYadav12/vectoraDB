@@ -84,7 +84,7 @@ function Layout() {
           </>}
         </div>
         <div className="right">
-          <a href="https://github.com/SauravYadav12/vectoraDB" target="_blank" rel="noreferrer" className="muted" style={{ fontSize: 13 }}>GitHub ↗</a>
+          <a href="https://github.com/vectoradb/vectoraDB" target="_blank" rel="noreferrer" className="muted" style={{ fontSize: 13 }}>GitHub ↗</a>
           <UserMenu />
           <ThemeToggle />
         </div>

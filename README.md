@@ -105,14 +105,14 @@ Linux VM (on macOS), Docker, ZFS, the copy-on-write pool, and the image.
 
 ```bash
 brew install lima
-curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vectoradb/vectoraDB/main/deploy/install.sh | sh
 vdb setup
 ```
 
 **Linux**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vectoradb/vectoraDB/main/deploy/install.sh | sh
 sudo vdb start
 ```
 
@@ -120,7 +120,7 @@ sudo vdb start
 commands). Needs Windows 10 21H2+/11 with virtualization enabled; everything else is handled for you:
 
 ```powershell
-irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
+irm https://raw.githubusercontent.com/vectoradb/vectoraDB/main/deploy/install.ps1 | iex
 ```
 
 That installs WSL if you don't have it (no Linux distribution needed — VectoraDB brings its own),
@@ -322,11 +322,9 @@ git tag -a v0.5.3 -m "…" && git push origin v0.5.3   # CI builds + publishes t
 The repository (and its releases) must be **public** for the `curl … | sh`
 one-liner to work for others.
 
-> **Pending: org move.** The module path is `github.com/vectoradb/vectoradb`; the
-> repo is being moved to a `vectoradb` GitHub org so `go install` resolves. When
-> that transfer happens, sweep every `SauravYadav12/vectoraDB` reference (the
-> install one-liners in `deploy/`, this README, `docs/`, `web/src/pages/`, and
-> the GHCR image org) to `vectoradb/vectoradb`.
+The project lives at **`github.com/vectoradb/vectoraDB`** (the `vectoradb` org),
+matching the `github.com/vectoradb/vectoradb` module path so
+`go install github.com/vectoradb/vectoradb/cmd/vdb@latest` resolves.
 
 ## Testing
 

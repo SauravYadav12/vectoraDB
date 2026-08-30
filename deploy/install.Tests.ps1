@@ -17,7 +17,7 @@ Describe 'Get-VdbAsset (latest)' {
     }
     It 'builds a latest release URL' {
         Get-VdbAsset 'vdb-windows-amd64.exe' |
-            Should -Be 'https://github.com/SauravYadav12/vectoraDB/releases/latest/download/vdb-windows-amd64.exe'
+            Should -Be 'https://github.com/vectoradb/vectoraDB/releases/latest/download/vdb-windows-amd64.exe'
     }
 }
 
@@ -29,7 +29,7 @@ Describe 'Get-VdbAsset (pinned)' {
     AfterAll { $env:VDB_VERSION = $null }
     It 'builds a versioned release URL' {
         Get-VdbAsset 'vdb-windows-amd64.exe' |
-            Should -Be 'https://github.com/SauravYadav12/vectoraDB/releases/download/v1.2.3/vdb-windows-amd64.exe'
+            Should -Be 'https://github.com/vectoradb/vectoraDB/releases/download/v1.2.3/vdb-windows-amd64.exe'
     }
 }
 

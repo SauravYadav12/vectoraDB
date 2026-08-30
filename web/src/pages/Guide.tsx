@@ -78,23 +78,23 @@ export default function Guide() {
         Docker, ZFS, the storage pool, and the image).</p>
       <p><strong>macOS</strong> (needs <a href="https://lima-vm.io" target="_blank" rel="noreferrer">Lima</a>):</p>
       <Code>{`brew install lima
-curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/vectoradb/vectoraDB/main/deploy/install.sh | sh
 vdb setup`}</Code>
       <p><strong>Linux</strong>:</p>
-      <Code>{`curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+      <Code>{`curl -fsSL https://raw.githubusercontent.com/vectoradb/vectoraDB/main/deploy/install.sh | sh
 sudo vdb start`}</Code>
       <p><strong>Windows</strong> (needs <a href="https://learn.microsoft.com/windows/wsl/install" target="_blank" rel="noreferrer">WSL2</a> —
         enable it once with <code>wsl --install</code> in an <strong>Administrator</strong> PowerShell, then reboot).
         Run the commands below <strong>in PowerShell</strong> (not Command Prompt) — <code>irm</code>/<code>iex</code> are
         PowerShell commands:</p>
-      <Code>{`irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex
+      <Code>{`irm https://raw.githubusercontent.com/vectoradb/vectoraDB/main/deploy/install.ps1 | iex
 vdb setup`}</Code>
       <p className="muted">Seeing <code>irm : not recognized</code>? You're in Command Prompt — open <strong>PowerShell</strong>
         and retry. If scripts are blocked, run <code>Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass</code> first.
         After install, open a <strong>new</strong> terminal so <code>vdb</code> is on your PATH.</p>
       <p className="muted">The engine runs inside a dedicated <code>vectoradb</code> WSL2 distro (the analog of
         the macOS VM); your other WSL distros and Docker Desktop are left untouched. Full steps &amp; troubleshooting:{' '}
-        <a href="https://github.com/SauravYadav12/vectoraDB/blob/main/docs/windows-setup.md" target="_blank" rel="noreferrer">Windows setup guide</a>.</p>
+        <a href="https://github.com/vectoradb/vectoraDB/blob/main/docs/windows-setup.md" target="_blank" rel="noreferrer">Windows setup guide</a>.</p>
       <p>Your app connects at <code>localhost:6432</code>; the web console &amp; dashboard are served by
         <code>vdb start</code> at <code>localhost:8080</code> (all platforms). For UI development, run
         <code>make web-dev</code> for the hot-reloading dev server at <code>localhost:5173</code>.</p>
