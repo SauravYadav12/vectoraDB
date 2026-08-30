@@ -1,15 +1,65 @@
 # VectoraDB
 
-A **serverless PostgreSQL** platform with instant branching, time-travel /
-point-in-time recovery, and an agent-branch API — built so that **transaction
-speed is never compromised**.
+**Postgres for AI agents — instant branches, and a record of every schema change.**
 
-VectoraDB keeps the hot transaction path on **stock PostgreSQL on local NVMe**
-(native commit and read latency) and moves durability, branching, and
-time-travel **off** the commit path: **ZFS copy-on-write** clones for instant
-branches, and **asynchronous WAL archival** (via `wal-g`) to object storage for
-durability and PITR. It is the postgres.ai / Database Lab model, implemented in
-Go.
+VectoraDB is a **serverless PostgreSQL** platform: stock Postgres on local NVMe
+(native commit latency), with durability, branching, and time-travel moved *off*
+the commit path — **ZFS copy-on-write** clones for instant branches and
+**asynchronous WAL archival** (`wal-g`) for PITR. It speaks the native Postgres
+wire protocol, so your existing driver, ORM, and SQL work unchanged. It is the
+postgres.ai / Database Lab model, implemented in Go.
+
+### What you get
+
+- **[Schema Ledger](#the-schema-ledger)** — every `CREATE`/`ALTER`/`DROP`
+  recorded with the actor (human or agent), tool, and branch, plus a
+  destructive-DDL guardrail. This is the part no other Postgres branching tool has.
+- **Instant branching** — `vdb branch create qa` clones the whole database in
+  seconds (copy-on-write), fully isolated; `main` is untouched.
+- **Time travel / PITR** — continuous WAL archival, restore to any point.
+- **One serverless endpoint** — connect to `:6432`; the database name *is* the
+  branch. Idle branches scale to zero and wake on connect.
+- **A database per AI agent** — the Agent Branch API hands each agent its own
+  instant, disposable branch over HTTP.
+- **Migrate from anything** — import from PostgreSQL, MySQL/MariaDB, MongoDB, and
+  `.sql`/`.csv`/`.json`/`.ndjson` files, each landing in a fresh branch.
+- **ETL pipelines** *(experimental)* — dbt-style SQL models with data-quality
+  tests, each run against a throwaway branch.
+- **High availability** — a hot standby with transparent `ha failover`
+  (single-VM demonstration).
+- **Accounts & API keys** — email/password or GitHub/Google OAuth; keys mint the
+  gateway password.
+- **Web console** — a React UI (dashboard, SQL console, ledger viewer), served
+  by the engine itself.
+
+Connections are encrypted: clients with `sslmode=require` (Prisma's default, and
+most cloud drivers) connect out of the box, and per-install credentials are
+generated on first run — nothing hardcoded.
+
+## The Schema Ledger
+
+The differentiator. Three Postgres event triggers, installed into `main` and
+inherited by every branch, capture **every** schema change and attribute it:
+
+- **who** — the actor (a human email, or `agent-alice`) and whether it was a
+  human or an agent;
+- **what** — the command, the object, and the full statement;
+- **context** — the tool (`application_name`, e.g. `cursor/opus`), the branch,
+  and the session;
+- **a guardrail** — destructive DDL (e.g. `DROP TABLE`) is blocked by policy
+  unless explicitly overridden, and blocked attempts are recorded too.
+
+```bash
+vdb ledger          # every schema change on this branch, most recent first
+```
+
+The actor is set by the gateway from the API key (and by the Agent Branch API at
+the database level), so DDL an agent runs is attributed to that agent — the
+record developers building with AI agents actually need. There is a **Ledger**
+page in the web console too.
+
+> Tamper-evidence — an append-only, hash-chained ledger with `vdb ledger verify`
+> — is on the near-term roadmap.
 
 ## Status
 
@@ -117,11 +167,14 @@ Other endpoints: control API `http://localhost:8080/api`, gateway
 
 ### Web app (`web/`)
 
-The UI is a standalone **Vite + React + TypeScript** app that consumes the
-control-plane REST API — it is **not** embedded in the Go binary. It has a
-landing page, docs, an ops **dashboard** (live status + branch CRUD), and a
-**SQL console**. Run it with `make web-dev`; point it at a different API with
-`VITE_API_URL`. The API is also usable directly:
+The UI is a **Vite + React + TypeScript** app that consumes the control-plane
+REST API. In release builds it is **embedded into the engine binary** (the
+`embedui` build tag) and served same-origin, so `vdb start` serves the web
+console at `https://localhost:8080` with nothing else to run. For UI development,
+`make web-dev` runs a hot-reloading dev server at `http://localhost:5173` against
+the API (`VITE_API_URL` points it elsewhere). It has a landing page, docs, an ops
+**dashboard** (live status + branch CRUD), a **SQL console**, and a **Ledger**
+viewer. The API is also usable directly:
 
 ```bash
 curl localhost:8080/api/status
@@ -152,20 +205,24 @@ vdb down               # stop containers (ZFS datasets preserved)
 
 ### Single endpoint (serverless front door)
 
-`vdb gateway` exposes one PostgreSQL endpoint (`:6432`) and routes each
+`vdb gateway` exposes one TLS PostgreSQL endpoint (`:6432`) and routes each
 connection to the branch named by the `database` parameter — so clients use one
 stable address instead of per-branch ports. **The gateway authenticates with an
-API key used as the password** — mint one with `vdb apikey create <email>` (or on
-the web *API keys* page). Set it once and connect normally:
+API key used as the password.** `vdb setup` creates a local key for you and
+prints a ready-to-paste connection string (also saved in `~/.vectoradb/config`);
+mint more with `vdb apikey create <email>` or on the web *API keys* page.
 
 ```bash
-export PGPASSWORD="vdb_…"                                     # your API key
-psql "postgresql://vectoradb@127.0.0.1:6432/main"            # -> main
-psql "postgresql://vectoradb@127.0.0.1:6432/agent-bob"       # -> bob's branch
-# (or inline: postgresql://vectoradb:<API_KEY>@127.0.0.1:6432/main)
+export PGPASSWORD="vdb_…"                                                  # your API key
+psql "postgresql://vectoradb@127.0.0.1:6432/main?sslmode=require"          # -> main
+psql "postgresql://vectoradb@127.0.0.1:6432/agent-bob?sslmode=require"     # -> bob's branch
 ```
 
-> Set `VECTORADB_GATEWAY_NOAUTH=1` to disable gateway auth for trusted/local use.
+The gateway serves a self-signed certificate by default (point
+`VECTORADB_TLS_CERT`/`VECTORADB_TLS_KEY` at a real pair for `sslmode=verify-full`).
+
+> `VECTORADB_GATEWAY_NOAUTH=1` disables gateway auth for trusted/local use; it is
+> being removed from release builds.
 
 **Auto-suspend / auto-resume (serverless behaviour).** The gateway suspends any
 branch idle longer than `--idle` (default `2m`, `--idle 0` to disable) and
@@ -181,7 +238,7 @@ Suspended branches keep their data (only the container stops); resume takes a
 couple of seconds. Connect through the gateway for a stable address — a resumed
 branch's direct per-branch port may change.
 
-MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`).
+MinIO console: http://localhost:9001 (per-install credentials in `~/.vectoradb/secrets.json`).
 
 > **PITR window:** a timestamp target must fall at or before the last *archived*
 > transaction; use `--to latest` for the newest state, and
@@ -224,6 +281,20 @@ vdb ha disable     # remove the standby
 > rerouting). Production HA additionally needs multi-host deployment, automatic
 > failure detection, and fencing against split-brain.
 
+## What VectoraDB is not
+
+Being precise about the boundaries is part of being trustworthy:
+
+- **Not distributed / not multi-host (yet).** Compute and storage are separated
+  *logically* — stateless containers over persistent storage, scale-to-zero —
+  but they still run on one host. Networked storage disaggregation (compute
+  scheduled independently of its data) is on the roadmap, not shipped.
+- **HA is a single-VM demonstration**, not a production multi-host deployment.
+- **Not a vector database**, despite the name — it is PostgreSQL. (You can of
+  course use `pgvector` on it.)
+- **Single-tenant today** — authenticated users share one instance; there is no
+  RBAC or project isolation yet.
+
 ## Development
 
 Build from a source checkout instead of the installer:
@@ -239,18 +310,23 @@ Docker image are created automatically on the first `vdb start`/`vdb up`.
 
 ### Releasing (maintainers)
 
-Cut a versioned release so the installer one-liner can fetch prebuilt binaries:
+Releases are automated: pushing a `v*` tag runs `.github/workflows/release.yml`,
+which builds every binary and the install assets and attaches them to the GitHub
+release. `deploy/install.sh` / `install.ps1` download `vdb-<os>-<arch>` from the
+**latest** release.
 
 ```bash
-make release VERSION=0.1.0                 # -> dist/vdb-{darwin,linux}-{amd64,arm64}
-gh release create v0.1.0 dist/* \
-  --title v0.1.0 --notes "First release"    # uploads the binaries as release assets
+git tag -a v0.5.3 -m "…" && git push origin v0.5.3   # CI builds + publishes the release
 ```
 
-`deploy/install.sh` downloads `vdb-<os>-<arch>` from the **latest** release.
-For the public `curl … | sh` one-liner to work for others, the repository (and
-thus its releases) must be **public** — on a private repo, asset downloads
-require an authenticated GitHub token.
+The repository (and its releases) must be **public** for the `curl … | sh`
+one-liner to work for others.
+
+> **Pending: org move.** The module path is `github.com/vectoradb/vectoradb`; the
+> repo is being moved to a `vectoradb` GitHub org so `go install` resolves. When
+> that transfer happens, sweep every `SauravYadav12/vectoraDB` reference (the
+> install one-liners in `deploy/`, this README, `docs/`, `web/src/pages/`, and
+> the GHCR image org) to `vectoradb/vectoradb`.
 
 ## Testing
 
