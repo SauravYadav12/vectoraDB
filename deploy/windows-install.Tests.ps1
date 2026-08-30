@@ -97,7 +97,7 @@ Describe 'installer behaviour' {
     It 'builds a latest asset URL over HTTPS' {
         $u = Get-VdbAsset 'vdb-windows-amd64.exe'
         $u | Should -BeLike 'https://*'
-        $u | Should -Be 'https://github.com/SauravYadav12/vectoraDB/releases/latest/download/vdb-windows-amd64.exe'
+        $u | Should -Be 'https://github.com/vectoradb/vectoraDB/releases/latest/download/vdb-windows-amd64.exe'
     }
 
     It 'never downloads over plain HTTP' {

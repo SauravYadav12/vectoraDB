@@ -7,16 +7,16 @@
 #   Linux:  sudo vdb start # provisions ZFS/Docker/image and brings everything up
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/vectoradb/vectoraDB/main/deploy/install.sh | sh
 #
 # Env overrides:
 #   VDB_VERSION   release tag to install         (default: latest)
-#   VDB_REPO      GitHub owner/repo              (default: SauravYadav12/vectoraDB)
+#   VDB_REPO      GitHub owner/repo              (default: vectoradb/vectoraDB)
 #   VDB_DIST      install from a local dir of prebuilt binaries instead of downloading
 #   VDB_PREFIX    install prefix                 (default: /usr/local)
 set -eu
 
-REPO="${VDB_REPO:-SauravYadav12/vectoraDB}"
+REPO="${VDB_REPO:-vectoradb/vectoraDB}"
 VERSION="${VDB_VERSION:-latest}"
 PREFIX="${VDB_PREFIX:-/usr/local}"
 BINDIR="$PREFIX/bin"

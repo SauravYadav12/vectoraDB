@@ -8,6 +8,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -126,17 +128,23 @@ func main() {
 		for name, args := range services {
 			must(daemon.Start(name, args))
 		}
+		apiKey := bootstrapLocalKey()
 		fmt.Println("\nVectoraDB is up (background):")
 		if web.FS() != nil {
-			fmt.Println("  web UI       http://localhost:8080")
+			fmt.Println("  web UI       https://localhost:8080")
 		}
-		fmt.Println("  control API  http://localhost:8080/api/status")
-		fmt.Println("  agent API    http://localhost:8088   (POST /agents/{id}/branch)")
-		fmt.Println("  gateway(SQL) postgres://vectoradb:vectoradb@localhost:6432/<branch>")
-		fmt.Println("  storage      http://localhost:9001   (minioadmin/minioadmin)")
+		fmt.Println("  control API  https://localhost:8080/api/status")
+		fmt.Println("  agent API    https://localhost:8088   (POST /agents/{id}/branch)")
+		if apiKey != "" {
+			fmt.Printf("  gateway(SQL) postgresql://vectoradb:%s@localhost:6432/main?sslmode=require\n", apiKey)
+		} else {
+			fmt.Println("  gateway(SQL) postgresql://vectoradb:<API_KEY>@localhost:6432/<branch>?sslmode=require")
+		}
+		fmt.Println("  storage      http://localhost:9001   (console login in ~/.vectoradb/secrets.json)")
 		if web.FS() == nil {
 			fmt.Println("\nThe web UI isn't embedded in this build — run it with:  make web-dev   (http://localhost:5173)")
 		}
+		fmt.Println("\nThe connection string above uses a ready-to-go API key (also saved in ~/.vectoradb/config).")
 		fmt.Println("Stop everything with: vdb stop")
 	case "stop":
 		for name := range services {
@@ -447,6 +455,67 @@ func openStore() *auth.Store {
 	s, err := auth.OpenFromEnv()
 	must(err)
 	return s
+}
+
+func vectoradbDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.TempDir()
+	}
+	return filepath.Join(home, ".vectoradb")
+}
+
+func configPath() string { return filepath.Join(vectoradbDir(), "config") }
+
+// bootstrapLocalKey makes a fresh install usable with no manual account steps.
+// On first run it creates a local user and an API key, caching the key in
+// ~/.vectoradb/config so `vdb start` can always print a working connection
+// string. Returns the API key, or "" if it can't be determined (in which case
+// the banner falls back to a <API_KEY> placeholder). Never fatal — a bootstrap
+// hiccup must not stop the stack from coming up.
+func bootstrapLocalKey() string {
+	if k := readCachedKey(); k != "" {
+		return k
+	}
+	store, err := auth.OpenFromEnv()
+	if err != nil {
+		return ""
+	}
+	if store.HasAnyUser() {
+		return "" // accounts exist but no cached key — the key is shown only once
+	}
+	pw := make([]byte, 16)
+	if _, err := rand.Read(pw); err != nil {
+		return ""
+	}
+	u, err := store.CreateUser("local@vectoradb", hex.EncodeToString(pw))
+	if err != nil {
+		return ""
+	}
+	key, _, err := store.CreateAPIKey(u.ID, "setup")
+	if err != nil {
+		return ""
+	}
+	writeCachedKey(key)
+	return key
+}
+
+func readCachedKey() string {
+	b, err := os.ReadFile(configPath())
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "api_key="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+func writeCachedKey(key string) {
+	_ = os.MkdirAll(vectoradbDir(), 0o700)
+	_ = os.WriteFile(configPath(), []byte("api_key="+key+"\n"), 0o600)
 }
 
 func userCreate(email string) error {

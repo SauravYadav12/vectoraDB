@@ -27,7 +27,7 @@ func HAInfo() HAState {
 	}
 	st.Enabled = true
 	st.Standby = cs
-	out, _ := capture("docker", "exec", "-e", "PGPASSWORD="+pgPassword, PrimaryContainer(),
+	out, _ := capture("docker", "exec", "-e", "PGPASSWORD="+pgPass(), PrimaryContainer(),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-tAc",
 		"SELECT count(*) FROM pg_stat_replication WHERE state='streaming';")
 	if n := strings.TrimSpace(out); n != "" && n != "0" {
@@ -58,7 +58,7 @@ func HAEnable() error {
 	// 1. Allow replication connections on the primary, then reload.
 	quiet("docker", "exec", "-u", "postgres", primary, "bash", "-c",
 		`grep -q '^host replication' "$PGDATA/pg_hba.conf" || echo 'host replication all all scram-sha-256' >> "$PGDATA/pg_hba.conf"`)
-	if err := run("docker", "exec", "-e", "PGPASSWORD="+pgPassword, primary,
+	if err := run("docker", "exec", "-e", "PGPASSWORD="+pgPass(), primary,
 		"psql", "-U", pgUser, "-d", pgDatabase, "-c", "SELECT pg_reload_conf();"); err != nil {
 		return err
 	}
@@ -75,7 +75,7 @@ func HAEnable() error {
 
 	// 3. Base backup from the primary, with recovery config (-R) and streaming WAL.
 	if err := run("docker", "run", "--rm", "--user", pgUID, "--network", network,
-		"-e", "PGPASSWORD="+pgPassword,
+		"-e", "PGPASSWORD="+pgPass(),
 		"-v", store.standbyPath()+":/data",
 		image,
 		"pg_basebackup", "-h", primary, "-U", pgUser, "-D", "/data/pgdata",
@@ -88,7 +88,7 @@ func HAEnable() error {
 	if err := run("docker", "run", "-d",
 		"--name", container("standby"), "--network", network,
 		"-p", "0:5432",
-		"-e", "PGPASSWORD="+pgPassword, // used by the WAL receiver to authenticate
+		"-e", "PGPASSWORD="+pgPass(), // used by the WAL receiver to authenticate
 		"-e", "PGDATA=/var/lib/postgresql/data/pgdata",
 		"-v", store.standbyPath()+":/var/lib/postgresql/data",
 		image, "postgres", "-c", "listen_addresses=*"); err != nil {
@@ -110,11 +110,11 @@ func HAStatus() error {
 		return nil
 	}
 	fmt.Println("=== primary: connected standbys (pg_stat_replication) ===")
-	_ = run("docker", "exec", "-e", "PGPASSWORD="+pgPassword, PrimaryContainer(),
+	_ = run("docker", "exec", "-e", "PGPASSWORD="+pgPass(), PrimaryContainer(),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-x", "-c",
 		"SELECT application_name, client_addr, state, sync_state, replay_lag FROM pg_stat_replication;")
 	fmt.Println("=== standby: recovery position ===")
-	_ = run("docker", "exec", "-e", "PGPASSWORD="+pgPassword, container("standby"),
+	_ = run("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container("standby"),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-c",
 		"SELECT pg_is_in_recovery() AS in_recovery, pg_last_wal_receive_lsn() AS received, pg_last_wal_replay_lsn() AS replayed;")
 	return nil
@@ -127,7 +127,7 @@ func HAFailover() error {
 		return fmt.Errorf("no running standby to promote — run 'vectoradb ha enable' first")
 	}
 	old := PrimaryContainer()
-	if err := run("docker", "exec", "-e", "PGPASSWORD="+pgPassword, container("standby"),
+	if err := run("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container("standby"),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-c", "SELECT pg_promote();"); err != nil {
 		return err
 	}

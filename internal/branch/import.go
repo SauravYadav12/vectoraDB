@@ -330,7 +330,7 @@ func loadMySQL(p *Progress, target, dsn string) error {
 		return fmt.Errorf("prepare pgloader: %w", err)
 	}
 	dsn = strings.Replace(dsn, "mariadb://", "mysql://", 1)
-	pgTarget := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", pgUser, pgPassword, container(target), pgDatabase)
+	pgTarget := fmt.Sprintf("postgresql://%s:%s@%s:5432/%s", pgUser, pgPass(), container(target), pgDatabase)
 	p.Logf("  running pgloader (schema + data + type mapping)…\n")
 	// pgloader exits 0 even when it fails outright (a bad connection) or silently
 	// loads nothing (e.g. it can't read a MySQL 8.0 source's metadata), so the exit

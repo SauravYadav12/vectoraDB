@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/vectoradb/vectoradb/internal/ledger"
+	"github.com/vectoradb/vectoradb/internal/secrets"
 )
 
 const (
@@ -36,10 +37,16 @@ const (
 	mysqlImage    = "mysql:8"                  // client + mysqldump; speaks the MySQL 8.x protocol pgloader can't
 	mongoImage    = "mongo:7"                  // ships mongosh for enumerating/exporting collections
 	pgUser        = "vectoradb"
-	pgPassword    = "vectoradb"
 	pgDatabase    = "vectoradb"
 	pgUID         = "999" // the postgres user's uid inside the official image
 )
+
+// Credentials are generated per install (internal/secrets), not hardcoded. The
+// engine sets them on the containers it starts; the gateway reads the same
+// Postgres password to authenticate to the backend.
+func pgPass() string    { return secrets.Load().PGPassword }
+func minioUser() string { return secrets.Load().MinioUser }
+func minioPass() string { return secrets.Load().MinioPassword }
 
 func dataset(name string) string    { return datasetBase + "/" + name }
 func mountpoint(name string) string { return mountBase + "/" + name }
@@ -91,24 +98,28 @@ func startContainer(name string, primary bool) error {
 		"--name", container(name),
 		"--network", network,
 		"-e", "POSTGRES_USER=" + pgUser,
-		"-e", "POSTGRES_PASSWORD=" + pgPassword,
+		"-e", "POSTGRES_PASSWORD=" + pgPass(),
 		"-e", "POSTGRES_DB=" + pgDatabase,
 		"-e", "PGDATA=/var/lib/postgresql/data/pgdata",
 		"-v", mountpoint(name) + ":/var/lib/postgresql/data",
 	}
-	if primary {
-		// Publish the primary on a stable host port.
-		args = append(args, "-p", "5432:5432")
-	} else {
-		// Publish an ephemeral host port so agents/developers can connect
-		// directly to a branch.
-		args = append(args, "-p", "0:5432")
+	// Branch Postgres is reached by the in-guest gateway over the docker network
+	// (BackendAddr -> containerIP), so no host port is published by default. That
+	// keeps branch databases unreachable from outside the VM, where a direct
+	// connection would bypass the gateway, its API key, TLS, and ledger
+	// attribution. VECTORADB_DEBUG_PORTS publishes a host port for debugging.
+	if os.Getenv("VECTORADB_DEBUG_PORTS") != "" {
+		if primary {
+			args = append(args, "-p", "5432:5432")
+		} else {
+			args = append(args, "-p", "0:5432")
+		}
 	}
 	if primary {
 		args = append(args,
 			"-e", "WALG_S3_PREFIX=s3://vectoradb-wal",
-			"-e", "AWS_ACCESS_KEY_ID=minioadmin",
-			"-e", "AWS_SECRET_ACCESS_KEY=minioadmin",
+			"-e", "AWS_ACCESS_KEY_ID="+minioUser(),
+			"-e", "AWS_SECRET_ACCESS_KEY="+minioPass(),
 			"-e", "AWS_ENDPOINT=http://minio:9000",
 			"-e", "AWS_S3_FORCE_PATH_STYLE=true",
 			"-e", "AWS_REGION=us-east-1",
@@ -153,6 +164,9 @@ func Init() error {
 		return err
 	}
 	if ContainerState("main") == "running" {
+		if err := syncRolePassword("main"); err != nil { // ensure the role matches the generated secret
+			return err
+		}
 		return InstallLedger("main") // already up — ensure the ledger is present
 	}
 	store := activeStorage()
@@ -170,15 +184,34 @@ func Init() error {
 	if err := waitReady("main"); err != nil {
 		return err
 	}
+	// The data dir may have been initialized with a different POSTGRES_PASSWORD
+	// (an older install, or before per-install secrets existed). Sync the role
+	// password to the generated secret so the gateway's TCP login matches.
+	if err := syncRolePassword("main"); err != nil {
+		return err
+	}
 	// Install the schema ledger into main; every branch (a ZFS clone) inherits it.
 	return InstallLedger("main")
+}
+
+// syncRolePassword sets the Postgres role password to the per-install secret.
+// It connects over the container's local socket (trust auth), so it works even
+// when the stored password differs from the current secret.
+func syncRolePassword(name string) error {
+	return psqlStdin(name, fmt.Sprintf("ALTER USER %s WITH PASSWORD %s;", pgUser, quoteLiteral(pgPass())))
+}
+
+// quoteLiteral renders s as a single-quoted SQL string literal (doubling any
+// embedded quotes). The generated password is hex, but quote defensively.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // psqlStdin runs a (possibly multi-statement) SQL script on a branch's Postgres
 // by piping it to psql over stdin, aborting on the first error.
 func psqlStdin(name, sql string) error {
 	cmd := exec.Command("sudo", "docker", "exec", "-i",
-		"-e", "PGPASSWORD="+pgPassword, container(name),
+		"-e", "PGPASSWORD="+pgPass(), container(name),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-v", "ON_ERROR_STOP=1", "-q")
 	cmd.Stdin = strings.NewReader(sql)
 	cmd.Stdout = os.Stdout
@@ -206,7 +239,7 @@ func Ledger(name string, limit int) error {
 		command_tag AS command, coalesce(object_identity,'') AS object,
 		status, coalesce(risk,'') AS risk
 		FROM vdb.schema_ledger ORDER BY at DESC LIMIT %d`, limit)
-	return run("docker", "exec", "-e", "PGPASSWORD="+pgPassword, container(name),
+	return run("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container(name),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-P", "pager=off", "-c", q)
 }
 
@@ -224,7 +257,7 @@ func Create(name, parent string) error {
 	}
 	// Flush the parent to disk so the clone starts from a clean checkpoint
 	// (best-effort; crash recovery would handle it either way).
-	quiet("docker", "exec", "-e", "PGPASSWORD="+pgPassword, container(parent),
+	quiet("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container(parent),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-c", "CHECKPOINT;")
 
 	if err := activeStorage().clone(parent, name); err != nil {
@@ -271,7 +304,7 @@ func List() error {
 // SQL runs a single statement against a branch (used by the demo and, later,
 // the Agent Branch API).
 func SQL(name, stmt string) error {
-	return run("docker", "exec", "-e", "PGPASSWORD="+pgPassword, container(name),
+	return run("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container(name),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-c", stmt)
 }
 
@@ -279,7 +312,7 @@ func SQL(name, stmt string) error {
 // tuples-only) for programmatic checks.
 func Query(name, stmt string) (string, error) {
 	out, err := exec.Command("sudo", "docker", "exec",
-		"-e", "PGPASSWORD="+pgPassword, container(name),
+		"-e", "PGPASSWORD="+pgPass(), container(name),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-tAc", stmt).Output()
 	return strings.TrimSpace(string(out)), err
 }
@@ -304,8 +337,8 @@ func Up() error {
 		quiet("docker", "rm", "-f", "minio")
 		if err := run("docker", "run", "-d",
 			"--name", "minio", "--network", network,
-			"-e", "MINIO_ROOT_USER=minioadmin",
-			"-e", "MINIO_ROOT_PASSWORD=minioadmin",
+			"-e", "MINIO_ROOT_USER="+minioUser(),
+			"-e", "MINIO_ROOT_PASSWORD="+minioPass(),
 			"-p", "9000:9000", "-p", "9001:9001",
 			"-v", "vectoradb-minio:/data",
 			"minio/minio:latest", "server", "/data", "--console-address", ":9001",
@@ -316,7 +349,7 @@ func Up() error {
 	// Create the WAL bucket (idempotent).
 	if err := run("docker", "run", "--rm", "--network", network,
 		"--entrypoint", "sh", "minio/mc:latest", "-c",
-		"until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done; mc mb -p local/vectoradb-wal",
+		fmt.Sprintf("until mc alias set local http://minio:9000 %s %s; do sleep 1; done; mc mb -p local/vectoradb-wal", minioUser(), minioPass()),
 	); err != nil {
 		return err
 	}
@@ -339,7 +372,7 @@ func Down() error {
 func Backup() error {
 	return run("docker", "exec",
 		"-e", "PGHOST=localhost", "-e", "PGUSER="+pgUser,
-		"-e", "PGPASSWORD="+pgPassword, "-e", "PGDATABASE="+pgDatabase,
+		"-e", "PGPASSWORD="+pgPass(), "-e", "PGDATABASE="+pgDatabase,
 		container("main"), "wal-g", "backup-push", "/var/lib/postgresql/data/pgdata")
 }
 
@@ -383,7 +416,7 @@ func waitRecovered(name string) error {
 		if exec.Command("sudo", "docker", "exec", container(name),
 			"pg_isready", "-h", "localhost", "-U", pgUser, "-d", pgDatabase).Run() == nil {
 			out, _ := exec.Command("sudo", "docker", "exec",
-				"-e", "PGPASSWORD="+pgPassword, container(name),
+				"-e", "PGPASSWORD="+pgPass(), container(name),
 				"psql", "-h", "localhost", "-U", pgUser, "-d", pgDatabase,
 				"-tAc", "SELECT pg_is_in_recovery();").Output()
 			if strings.TrimSpace(string(out)) == "f" {
@@ -408,7 +441,7 @@ func Status() error {
 // PsqlShell opens an interactive psql session on a branch.
 func PsqlShell(name string) error {
 	cmd := exec.Command("sudo", "docker", "exec", "-it",
-		"-e", "PGPASSWORD="+pgPassword, container(name),
+		"-e", "PGPASSWORD="+pgPass(), container(name),
 		"psql", "-U", pgUser, "-d", pgDatabase)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -430,22 +463,28 @@ type Info struct {
 
 func agentBranch(id string) string { return "agent-" + id }
 
-func dsn(port string) string {
-	return fmt.Sprintf("postgresql://%s:%s@127.0.0.1:%s/%s", pgUser, pgPassword, port, pgDatabase)
+func dsn(host, port string) string {
+	return fmt.Sprintf("postgresql://%s:%s@%s:%s/%s", pgUser, pgPass(), host, port, pgDatabase)
 }
 
-// portOf returns the ephemeral host port docker published for a container's
-// Postgres (mapped from container port 5432).
-func portOf(cont string) (string, error) {
-	out, err := capture("docker", "port", cont, "5432/tcp")
+// containerIP returns a container's IP on the vectoradb docker network. The
+// in-guest gateway routes to it directly, so branch Postgres needs no published
+// host port and stays unreachable from outside the VM.
+func containerIP(cont string) (string, error) {
+	out, err := capture("docker", "inspect", "-f",
+		fmt.Sprintf("{{.NetworkSettings.Networks.%s.IPAddress}}", network), cont)
 	if err != nil {
 		return "", err
 	}
-	return parsePublishedPort(out)
+	ip := strings.TrimSpace(out)
+	if ip == "" {
+		return "", fmt.Errorf("container %q has no IP on the %q network", cont, network)
+	}
+	return ip, nil
 }
 
 // parsePublishedPort extracts the host port from `docker port` output such as
-// "0.0.0.0:32781\n[::]:32781".
+// "0.0.0.0:32781\n[::]:32781". Retained for VECTORADB_DEBUG_PORTS tooling.
 func parsePublishedPort(out string) (string, error) {
 	line := out
 	if i := strings.IndexByte(out, '\n'); i >= 0 {
@@ -458,8 +497,6 @@ func parsePublishedPort(out string) (string, error) {
 	return strings.TrimSpace(line[i+1:]), nil
 }
 
-func branchPort(name string) (string, error) { return portOf(container(name)) }
-
 // CreateAgentBranch gives agent id its own instant branch and returns how to
 // connect to it.
 func CreateAgentBranch(agentID string) (Info, error) {
@@ -467,7 +504,7 @@ func CreateAgentBranch(agentID string) (Info, error) {
 	if err := Create(name, "main"); err != nil {
 		return Info{}, err
 	}
-	port, err := branchPort(name)
+	ip, err := containerIP(container(name))
 	if err != nil {
 		return Info{}, err
 	}
@@ -477,7 +514,10 @@ func CreateAgentBranch(agentID string) (Info, error) {
 	_ = psqlStdin(name, fmt.Sprintf(
 		"ALTER DATABASE %s SET vdb.actor = '%s'; ALTER DATABASE %s SET vdb.actor_kind = 'agent';",
 		pgDatabase, actor, pgDatabase))
-	return Info{Agent: agentID, Branch: name, Host: "127.0.0.1", Port: port, DSN: dsn(port), Status: "ready"}, nil
+	// The DSN reaches the branch over the docker network (VM-internal); a host
+	// agent should connect through the gateway. A gateway-routed, key-scoped DSN
+	// is the planned replacement.
+	return Info{Agent: agentID, Branch: name, Host: ip, Port: "5432", DSN: dsn(ip, "5432"), Status: "ready"}, nil
 }
 
 // DeleteAgentBranch tears down agent id's branch.
@@ -496,11 +536,11 @@ func BackendAddr(name string) (string, error) {
 	if name == "main" {
 		cont = PrimaryContainer()
 	}
-	port, err := portOf(cont)
+	ip, err := containerIP(cont)
 	if err != nil {
 		return "", err
 	}
-	return "127.0.0.1:" + port, nil
+	return ip + ":5432", nil
 }
 
 // primaryFile records which branch container currently serves as the "main"
@@ -563,9 +603,7 @@ func Branches() ([]BranchInfo, error) {
 			State:   ContainerState(name),
 		}
 		if bi.State == "running" {
-			if p, err := branchPort(name); err == nil {
-				bi.Port = p
-			}
+			bi.Port = "5432" // in-container port; branches are reached via the gateway
 			if c, err := ActiveConnections(name); err == nil {
 				bi.Connections = c
 			}
@@ -656,7 +694,7 @@ func Wake(name string) error {
 // ActiveConnections returns the number of client connections currently open to a
 // branch (used to avoid suspending a branch that is in use).
 func ActiveConnections(name string) (int, error) {
-	out, err := capture("docker", "exec", "-e", "PGPASSWORD="+pgPassword, container(name),
+	out, err := capture("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container(name),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-tAc",
 		"SELECT count(*) FROM pg_stat_activity WHERE backend_type='client backend' AND pid<>pg_backend_pid();")
 	if err != nil {
@@ -692,10 +730,10 @@ func ListAgentBranches() ([]Info, error) {
 	var infos []Info
 	for _, n := range strings.Fields(out) {
 		bn := strings.TrimPrefix(n, "vec-")
-		port, _ := branchPort(bn)
+		ip, _ := containerIP(n)
 		infos = append(infos, Info{
 			Agent:  strings.TrimPrefix(bn, "agent-"),
-			Branch: bn, Host: "127.0.0.1", Port: port, DSN: dsn(port), Status: "ready",
+			Branch: bn, Host: ip, Port: "5432", DSN: dsn(ip, "5432"), Status: "ready",
 		})
 	}
 	return infos, nil

@@ -7,6 +7,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -18,12 +19,18 @@ import (
 
 	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
+	"github.com/vectoradb/vectoradb/internal/tlsutil"
 )
 
 // authStore verifies API keys presented as the connection password. When nil
 // (VECTORADB_GATEWAY_NOAUTH), the Gateway accepts any client and still mediates
 // the backend login — convenient for trusted/local use.
 var authStore *auth.Store
+
+// tlsConfig, when non-nil, lets the Gateway answer SSLRequest with 'S' and wrap
+// the client connection in TLS — so clients with sslmode=require connect and the
+// API key never crosses the wire in cleartext. Loaded once in Serve.
+var tlsConfig *tls.Config
 
 func gatewayNoAuth() bool {
 	v := os.Getenv("VECTORADB_GATEWAY_NOAUTH")
@@ -72,6 +79,12 @@ func Serve(addr string, idle time.Duration) error {
 		authStore = store
 		log.Printf("gateway authentication ENABLED — connect with an API key (vdb_…) as the password")
 	}
+	if cfg, err := tlsutil.ServerConfig(); err != nil {
+		log.Printf("TLS disabled (could not load certificate): %v — clients must use sslmode=disable", err)
+	} else {
+		tlsConfig = cfg
+		log.Printf("TLS enabled — clients can connect with sslmode=require")
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -94,7 +107,9 @@ func Serve(addr string, idle time.Duration) error {
 func handle(client net.Conn) {
 	defer client.Close()
 
-	params, err := readStartup(client)
+	// readStartup may upgrade the connection to TLS, so it returns the conn to
+	// use for the rest of the session (Go passes net.Conn by value).
+	client, params, err := readStartup(client)
 	if err != nil {
 		log.Printf("startup: %v", err)
 		return
@@ -164,32 +179,52 @@ func handle(client net.Conn) {
 	<-done
 }
 
-// readStartup reads the startup phase, declining SSL/GSS negotiation, and
-// returns the startup parameters (user, database, ...).
-func readStartup(client net.Conn) (map[string]string, error) {
+// readStartup reads the startup phase and returns the startup parameters (user,
+// database, ...). When TLS is configured it accepts an SSLRequest, upgrades the
+// connection, and returns the wrapped conn — the caller must use the returned
+// conn for the rest of the session. GSS is always declined.
+func readStartup(client net.Conn) (net.Conn, map[string]string, error) {
 	for {
 		header := make([]byte, 4)
 		if _, err := io.ReadFull(client, header); err != nil {
-			return nil, err
+			return client, nil, err
 		}
 		msgLen := int(binary.BigEndian.Uint32(header))
 		if msgLen < 8 || msgLen > 1<<20 {
-			return nil, fmt.Errorf("bad startup length %d", msgLen)
+			return client, nil, fmt.Errorf("bad startup length %d", msgLen)
 		}
 		body := make([]byte, msgLen-4)
 		if _, err := io.ReadFull(client, body); err != nil {
-			return nil, err
+			return client, nil, err
 		}
 		switch binary.BigEndian.Uint32(body[:4]) {
-		case codeSSL, codeGSS:
-			if _, err := client.Write([]byte{'N'}); err != nil { // we don't offer it
-				return nil, err
+		case codeSSL:
+			if tlsConfig == nil {
+				if _, err := client.Write([]byte{'N'}); err != nil { // we don't offer it
+					return client, nil, err
+				}
+				continue
+			}
+			// Offer TLS: reply 'S', then wrap and hand the loop the encrypted
+			// conn to read the real StartupMessage over.
+			if _, err := client.Write([]byte{'S'}); err != nil {
+				return client, nil, err
+			}
+			tconn := tls.Server(client, tlsConfig)
+			if err := tconn.Handshake(); err != nil {
+				return client, nil, fmt.Errorf("tls handshake: %w", err)
+			}
+			client = tconn
+			continue
+		case codeGSS:
+			if _, err := client.Write([]byte{'N'}); err != nil { // GSS never offered
+				return client, nil, err
 			}
 			continue
 		case codeStartup30:
-			return parseParams(body[4:]), nil
+			return client, parseParams(body[4:]), nil
 		default:
-			return nil, fmt.Errorf("unsupported startup code %d", binary.BigEndian.Uint32(body[:4]))
+			return client, nil, fmt.Errorf("unsupported startup code %d", binary.BigEndian.Uint32(body[:4]))
 		}
 	}
 }
