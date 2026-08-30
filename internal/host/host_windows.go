@@ -373,10 +373,42 @@ func provisionGuestWSL(name string) error {
 	if err := ensureZpoolDevice(name); err != nil {
 		return err
 	}
+	if err := loadPreloadedImages(name); err != nil {
+		return err
+	}
 	if err := stageImageContext(name); err != nil {
 		return err
 	}
 	return installGuestBinaryWSL(name)
+}
+
+// loadPreloadedImages imports the container images baked into the distro image.
+//
+// The prebuilt distro ships them as a docker save tarball rather than a
+// populated layer store, because building that store would mean running a second
+// dockerd inside a chroot on the builder. Loading here is local disk work and
+// replaces a docker build plus three registry pulls — the slowest and least
+// reliable part of a first start.
+//
+// A plain Ubuntu rootfs has no tarball, in which case this is a no-op and the
+// engine builds and pulls as before.
+func loadPreloadedImages(name string) error {
+	const tar = "/usr/local/share/vectoradb/images/vectoradb-images.tar"
+	if wslRoot(name, fmt.Sprintf("test -f %q", tar)) != nil {
+		return nil
+	}
+	// Already loaded (a re-run): the engine's own check is `docker image
+	// inspect`, so match it rather than guessing from the tarball's presence.
+	if wslRoot(name, "docker image inspect vectoradb/postgres-walg:16 >/dev/null 2>&1") == nil {
+		return nil
+	}
+	step("Loading the preinstalled container images")
+	if err := wslRoot(name, fmt.Sprintf("set -e; docker load -i %q", tar)); err != nil {
+		// Not fatal: the engine can still build and pull. Losing the fast path
+		// is better than failing an install over it.
+		logf("loading preinstalled images failed, falling back to build/pull: %v\n", err)
+	}
+	return nil
 }
 
 // zpoolUpScript attaches the pool image to a fixed loop device and imports the

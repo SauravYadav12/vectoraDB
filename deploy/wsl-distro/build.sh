@@ -89,24 +89,24 @@ sudo chroot "$root" /bin/sh -c '
 '
 
 echo "==> preload container images"
-# Pulled on the builder and loaded into the image's docker storage, so a user's
-# first start needs no registry access at all. Done with a throwaway dockerd
-# inside the chroot: `docker save`/`load` would work too, but loading into the
-# image directly keeps the layer store in its final form.
-sudo chroot "$root" /bin/sh -c '
-	set -e
-	dockerd --iptables=false --bridge=none >/var/log/dockerd-build.log 2>&1 &
-	for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done
-	docker info >/dev/null
+# Built and pulled with the *builder's* Docker, then saved into the image as a
+# tarball that `vdb setup` loads once.
+#
+# Deliberately not a dockerd inside the chroot: that needs /proc, /sys and /dev
+# bind-mounted, and a second daemon then shares the builder's kernel and cgroups
+# with whatever Docker is already running there. save/load keeps the two
+# completely separate, works the same in CI, and still removes every registry
+# round trip from the user's machine -- which is the point.
+images_dir="$root/usr/local/share/vectoradb/images"
+sudo mkdir -p "$images_dir"
 
-	docker build -t vectoradb/postgres-walg:16 /usr/local/share/vectoradb/docker/postgres
-	docker pull minio/minio:latest
-	docker pull minio/mc:latest
+docker build -t vectoradb/postgres-walg:16 "$repo/docker/postgres"
+docker pull minio/minio:latest
+docker pull minio/mc:latest
 
-	pkill dockerd || true
-	sleep 3
-	rm -f /var/log/dockerd-build.log
-'
+sudo docker save -o "$images_dir/vectoradb-images.tar" \
+	vectoradb/postgres-walg:16 minio/minio:latest minio/mc:latest
+sudo chmod 0644 "$images_dir/vectoradb-images.tar"
 
 echo "==> repackage"
 sudo rm -f "$root/etc/resolv.conf"
