@@ -324,8 +324,10 @@ func runQuery(addr, sql, actor string) map[string]any {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Connect as the non-superuser client role, so the web console is bound by the
+	// same rules as any other client (RLS, and the append-only ledger).
 	conn, err := pgx.Connect(ctx,
-		fmt.Sprintf("postgres://vectoradb:%s@%s/vectoradb", secrets.Load().PGPassword, addr))
+		fmt.Sprintf("postgres://vdbclient:%s@%s/vectoradb", secrets.Load().PGPassword, addr))
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}

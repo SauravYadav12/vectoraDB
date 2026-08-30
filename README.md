@@ -60,8 +60,11 @@ the database level), so DDL an agent runs is attributed to that agent — the
 record developers building with AI agents actually need. There is a **Ledger**
 page in the web console too.
 
-> Tamper-evidence — an append-only, hash-chained ledger with `vdb ledger verify`
-> — is on the near-term roadmap.
+> **Tamper-evident:** every row is hash-chained and the table is append-only, so
+> `vdb ledger verify` catches any deleted or edited entry. Clients connect through
+> the gateway as a per-user, non-superuser role, so they cannot rewrite history or
+> bypass the guardrail, Postgres **RLS and GRANTs apply** to them, and the recorded
+> **actor is the login identity** — a client cannot forge who made a change.
 
 ## Status
 

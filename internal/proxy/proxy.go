@@ -62,9 +62,10 @@ func touch(name string) {
 // this before forwarding to the backend.
 const realDatabase = "vectoradb"
 
-// realUser is the Postgres role inside every branch. The Gateway always logs in
-// to the backend as this role (using the API key only to gate the client).
-const realUser = "vectoradb"
+// realUser is the Postgres role the Gateway logs clients in as — a non-superuser
+// role, so client sessions obey RLS/GRANTs and cannot bypass the append-only
+// ledger. The API key gates the client; this role bounds what they can do.
+const realUser = "vdbclient"
 
 const (
 	codeStartup30 = 196608   // protocol 3.0 StartupMessage
@@ -165,9 +166,22 @@ func handle(client net.Conn) {
 	// user were only routing/identity inputs. The Gateway performs the backend
 	// handshake so the client never needs the real DB password.
 	params["database"] = realDatabase
-	params["user"] = realUser
+	// Log the client in as a per-user role named for their identity, so the
+	// ledger's session_user (which a client cannot change) is the authoritative
+	// actor — attribution becomes non-forgeable. Fall back to the shared role if
+	// the per-user role can't be provisioned.
+	loginUser := realUser
+	if actor != "" {
+		if err := branch.EnsureUserRole(target, actor); err != nil {
+			log.Printf("per-user role %q on %s: %v (using %s)", actor, target, err, realUser)
+		} else {
+			loginUser = actor
+		}
+	}
+	params["user"] = loginUser
 	// Attribution for the schema ledger: inject connection context that the
-	// branch's DDL event triggers read via current_setting('vectoradb.*').
+	// branch's DDL event triggers read via current_setting('vectoradb.*'). For a
+	// per-user login this is a fallback/display value; session_user is authoritative.
 	params["options"] = ledgerOptions(params["options"], actor, target)
 	if err := backendAuth(backend, params); err != nil {
 		log.Printf("backend auth %s: %v", addr, err)
