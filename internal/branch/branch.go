@@ -167,6 +167,7 @@ func Init() error {
 		if err := syncRolePassword("main"); err != nil { // ensure the role matches the generated secret
 			return err
 		}
+		activeStorage().protectPrimary()
 		return InstallLedger("main") // already up — ensure the ledger is present
 	}
 	store := activeStorage()
@@ -190,6 +191,9 @@ func Init() error {
 	if err := syncRolePassword("main"); err != nil {
 		return err
 	}
+	// Reserve pool space for the primary so branches can't take it read-only
+	// (idempotent — also applies on an upgrade of an existing install).
+	store.protectPrimary()
 	// Install the schema ledger into main; every branch (a ZFS clone) inherits it.
 	return InstallLedger("main")
 }
