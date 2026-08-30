@@ -55,8 +55,12 @@ web-dev:          ## Run the web UI dev server (http://localhost:5173) against t
 web-build:        ## Build the web UI to web/dist (same-origin; embedded into the engine binary)
 	npm --prefix web ci && VITE_API_URL= npm --prefix web run build
 
+# Both build scripts are invoked through bash rather than relying on their
+# exec bit: this repo is developed on Windows with core.filemode=false, where
+# a dropped +x is invisible locally and surfaces only as "Permission denied"
+# on the Linux runner.
 wsl-zfs:          ## Build the OpenZFS modules + userland for the stock WSL2 kernel (Linux builder/CI only)
-	deploy/wsl-zfs/build.sh
+	bash deploy/wsl-zfs/build.sh
 
 wsl-distro:       ## Build the prebuilt WSL2 distro image (Linux builder/CI with Docker)
-	deploy/wsl-distro/build.sh
+	bash deploy/wsl-distro/build.sh
