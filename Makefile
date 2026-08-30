@@ -49,7 +49,9 @@ test:             ## Run unit tests (host, no VM needed)
 integration:      ## Run the full end-to-end integration test in the Lima VM
 	lima bash -c 'cd "$(CURDIR)" && go build -o /tmp/vdb ./cmd/vdb' && lima bash "$(CURDIR)/scripts/integration_test.sh"
 
-web-dev:          ## Run the web UI dev server (http://localhost:5173) against the API
+web-dev:          ## DEPRECATED: the engine serves the UI at https://localhost:8080 (`vdb start`). Hot-reload dev server only.
+	@echo "note: 'make web-dev' is deprecated — 'vdb start' serves the UI at https://localhost:8080."
+	@echo "      This runs a hot-reloading dev server for UI development only."
 	npm --prefix web install --no-audit --no-fund && npm --prefix web run dev
 
 web-build:        ## Build the web UI to web/dist (same-origin; embedded into the engine binary)
