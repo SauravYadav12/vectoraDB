@@ -80,7 +80,7 @@ for this WSL kernel" message rather than a module that silently refuses to load.
 | `The request was aborted: The connection was closed unexpectedly` | Windows PowerShell 5.1 didn't negotiate TLS 1.2. The installer now sets it itself; if you hit this running an older copy, re-run the current one-liner. |
 | `vdb is not recognized` after install | The installer adds it to the current window's PATH as well as persisting it, so this should not happen. In a window opened *before* installing: `$env:Path += ";$env:LOCALAPPDATA\Programs\vectoradb"`. |
 | The install stops asking you to restart | Enabling the WSL components needs a reboot. Restart; the installer resumes on its own. If it doesn't, run the one-liner again. |
-| `no ZFS bundle published for this WSL kernel` | Your WSL kernel is newer than any this VectoraDB release ships a module for. Check for a newer VectoraDB release, or build one with `make wsl-zfs`. Do **not** `wsl --update` — that moves the kernel further ahead. |
+| `no ZFS module bundle published for this WSL kernel` | This release has no module built for your kernel (`wsl -e uname -r`). See *Supported WSL kernels* below — a maintainer can add yours in about an hour. Do **not** `wsl --update`: that moves the kernel further ahead, not closer. |
 | `WSL is present but not healthy` | Enable virtualization in the BIOS and the *Virtual Machine Platform* feature; `wsl --update`. |
 | `ZFS is not usable in the "vectoradb" distro` | The staged modules were built for a different kernel. Check `wsl -d vectoradb -- uname -r` against the bundle filename in `%LOCALAPPDATA%\Programs\vectoradb`. |
 | `systemd did not finish booting` | `wsl --terminate vectoradb`, then re-run `vdb setup`. |
@@ -105,6 +105,29 @@ Nothing else to undo — VectoraDB made no machine-wide WSL changes.
 > until the VM restarts. A reinstall in the same VM lifetime would otherwise find
 > a device pointing at the deleted pool image. `vdb setup` detects this and stops
 > with instructions rather than proceeding, but a `wsl --shutdown` avoids it.
+
+## Supported WSL kernels (maintainers)
+
+ZFS modules only load against the exact kernel they were built for, so a release
+must ship a bundle per kernel its users run. Microsoft ships new WSL kernels
+regularly and `wsl --update` moves people onto them, so this list needs
+maintaining — a user on an uncovered kernel gets a clear
+*"no ZFS module bundle published for this WSL kernel"* and cannot install.
+
+The list lives in the `modules` matrix in
+[`.github/workflows/wsl-distro.yml`](../.github/workflows/wsl-distro.yml). Each
+entry is a `microsoft/WSL2-Linux-Kernel` tag; the expected `uname -r` is derived
+from it, and the build fails loudly if they disagree. One entry is marked
+`primary` — its ZFS userland is baked into the distro image. The userland is
+identical across kernels (same `ZFS_TAG`), so only one entry needs it.
+
+Everything else in the image is kernel-independent, which is why adding a kernel
+costs one ~2 MB bundle rather than another 740 MB image.
+
+**To cover a new kernel on an existing release**, run the **wsl-zfs** workflow
+manually with the kernel tag and the release tag. It builds just that bundle
+(~1 hour), attaches it, and updates `SHA256SUMS` — no full rebuild. Add the
+kernel to the matrix as well, so future releases keep covering it.
 
 ## Building the ZFS bundle (maintainers)
 

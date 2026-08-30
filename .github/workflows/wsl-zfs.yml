@@ -8,17 +8,19 @@
 # Slow (a full kernel build), so this does not run on every PR.
 name: wsl-zfs
 
+# Manual only. Tagged releases build their kernels from the matrix in
+# wsl-distro.yml; this is for adding one more kernel to a release that already
+# exists -- which is what a user hitting "no ZFS module bundle published for this
+# WSL kernel" needs, without rebuilding everything else.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       kernel_tag:
-        description: 'microsoft/WSL2-Linux-Kernel tag (e.g. linux-msft-wsl-6.6.87.2)'
-        required: false
-      expect_release:
-        description: 'Expected uname -r (e.g. 6.6.87.2-microsoft-standard-WSL2)'
-        required: false
+        description: 'microsoft/WSL2-Linux-Kernel tag (e.g. linux-msft-wsl-6.18.33.2)'
+        required: true
+      release_tag:
+        description: 'Release to attach the bundle to (e.g. v0.5.0)'
+        required: true
 
 permissions:
   contents: write
@@ -30,15 +32,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build ZFS for the WSL2 kernel
+      - name: Build ZFS for ${{ inputs.kernel_tag }}
         env:
           KERNEL_TAG: ${{ inputs.kernel_tag }}
-          EXPECT_RELEASE: ${{ inputs.expect_release }}
         run: |
-          # Empty inputs must fall back to the pins in build.sh, not override
-          # them with "".
-          [ -n "$KERNEL_TAG" ]     || unset KERNEL_TAG
-          [ -n "$EXPECT_RELEASE" ] || unset EXPECT_RELEASE
+          set -eux
+          # Derived from the tag rather than asked for separately, so the two
+          # cannot disagree. build.sh asserts the built kernel matches, so a bad
+          # tag fails loudly instead of shipping modules that cannot load.
+          EXPECT_RELEASE="${KERNEL_TAG#linux-msft-wsl-}-microsoft-standard-WSL2"
+          export EXPECT_RELEASE
           make wsl-zfs
 
       - name: Summarize
@@ -46,23 +49,22 @@ jobs:
           echo "kernel release: $(cat dist/vectoradb-zfs.release)"
           ls -la dist/
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vectoradb-zfs
-          path: |
-            dist/vectoradb-zfs-*.tar.gz
-            dist/vectoradb-zfs.release
-
-      # On a tag, attach the bundle to the release so install.ps1 can fetch it.
-      # release.yml normally created it long before this hour-long build ends,
-      # but this job must not fail just because it ran alone (a re-run, or a
-      # workflow_dispatch), so create it if it is missing.
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Only the modules: the userland ships inside the distro image, which this
+      # workflow does not rebuild.
+      - name: Attach the module bundle to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
-            gh release create "$GITHUB_REF_NAME" --prerelease --generate-notes --title "$GITHUB_REF_NAME"
-          gh release upload "$GITHUB_REF_NAME" \
-            dist/vectoradb-zfs-*.tar.gz dist/vectoradb-zfs.release --clobber
+          set -eux
+          gh release upload "$TAG" dist/vectoradb-zfs-modules-*.tar.gz --clobber
+
+          # Keep SHA256SUMS complete, or setup skips verifying this bundle.
+          cd dist
+          gh release download "$TAG" -p SHA256SUMS -O existing.txt 2>/dev/null || : > existing.txt
+          sha256sum vectoradb-zfs-modules-*.tar.gz > mine.txt
+          awk '{print $2}' mine.txt > names.txt
+          grep -vFf names.txt existing.txt > SHA256SUMS || : > SHA256SUMS
+          cat mine.txt >> SHA256SUMS
+          sort -k2 -o SHA256SUMS SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --clobber

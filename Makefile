@@ -3,13 +3,21 @@
 # VectoraDB runs inside the Linux dev VM (ZFS + Docker); day-to-day operation is
 # via `lima /tmp/vdb <command>`. This Makefile just builds/checks the CLI.
 
-.PHONY: build vet fmt vm-build test integration web-dev web-build release wsl-zfs wsl-distro
+.PHONY: build vet fmt vm-build test integration web-dev web-build release release-linux wsl-zfs wsl-distro
 
 VERSION ?= 0.1.0
 LDFLAGS := -s -w -X github.com/vectoradb/vectoradb/internal/version.Version=$(VERSION)
 
 build:            ## Build the CLI into ./bin/vdb (host)
 	go build -o bin/vdb ./cmd/vdb
+
+# The distro image bakes in one binary. Building the other four release
+# targets to get it cost several minutes of cross-compilation per run, and
+# release.yml already builds and publishes the full set separately.
+release-linux: web-build   ## Cross-compile just the Linux engine binary (for the distro image)
+	@mkdir -p dist
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+		go build -trimpath -tags embedui -ldflags "$(LDFLAGS)" -o dist/vdb-linux-amd64 ./cmd/vdb
 
 release: web-build   ## Cross-compile release binaries + the Windows image context into ./dist
 	@mkdir -p dist

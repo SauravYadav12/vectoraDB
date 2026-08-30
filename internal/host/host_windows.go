@@ -5,13 +5,9 @@
 package host
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,7 +93,7 @@ func forwardStdin(args []string, stdin io.Reader) error {
 		}
 		// Only on a cold start: the pool unit runs at boot, and if it could not
 		// bring the pool up the engine must not proceed to create a new one.
-		if err := checkZpoolUnit(name); err != nil {
+		if err := checkStorageUnit(name); err != nil {
 			return err
 		}
 	}
@@ -249,7 +245,7 @@ func setupWindows() error {
 	}
 	// Re-checked every time for the same reason, plus one of its own: a WSL
 	// update can move the kernel out from under an already-provisioned distro.
-	if err := verifyZFS(name); err != nil {
+	if err := verifyBtrfs(name); err != nil {
 		return err
 	}
 	step("Starting VectoraDB")
@@ -367,10 +363,10 @@ func provisionGuestWSL(name string) error {
 	if err := installDocker(name); err != nil {
 		return err
 	}
-	if err := installZFS(name); err != nil {
+	if err := ensureBtrfs(name); err != nil {
 		return err
 	}
-	if err := ensureZpoolDevice(name); err != nil {
+	if err := ensureStorage(name); err != nil {
 		return err
 	}
 	if err := loadPreloadedImages(name); err != nil {
@@ -411,251 +407,81 @@ func loadPreloadedImages(name string) error {
 	return nil
 }
 
-// zpoolUpScript attaches the pool image to a fixed loop device and imports the
-// pool, at every distro boot.
+// storageUpScript mounts the btrfs filesystem the branches live on, at every
+// distro boot.
 //
-// It exists because two engine assumptions don't hold here. First, a file vdev
-// cannot back a pool on the WSL2 kernel, so the image needs a loop device.
-// Second, the engine never imports: `ensurePool` falls through to
-// `zpool create -f` when it sees no pool, which would silently destroy an
-// existing one — and WSL stops idle distros, so that reboot happens routinely.
-// ZFS's own zfs-import-cache.service cannot cover this, because no zpool.cache
-// is written for a loop-backed pool.
+// It replaces a much larger ZFS equivalent. That one had to attach the pool
+// image to a loop device (the WSL kernel cannot back a pool with a plain file),
+// pick the device by backing inode to avoid adopting a stale binding from an
+// unregistered distro, import the pool without scanning /dev, and refuse to
+// continue on a suspended pool -- because detaching a device under a live pool
+// wedges the VM, and because the engine would otherwise reach `zpool create -f`
+// and overwrite existing data.
 //
-// Hence the interlock at the end: if the image already carries a pool that would
-// not import, the loop device is detached again, so the engine finds no vdev and
-// fails loudly instead of recreating the pool over live data.
-const zpoolUpScript = `#!/bin/sh
-# Managed by vdb setup. Attaches the VectoraDB pool image to a loop device and
-# imports the pool before the engine runs.
-#
-# Two rules keep this safe:
-#   - Never detach a loop device. Pulling one out from under an imported pool
-#     suspends its I/O, and every later operation fails with "pool I/O is
-#     currently suspended".
-#   - Use "if cmd; then" rather than "cmd && exit 0". Under set -e a failing
-#     && list aborts the script, so the latter kills this unit on a fresh
-#     machine, exactly when the pool legitimately does not exist yet.
+// btrfs needs none of that: mkfs works on the file directly, and mounting is the
+// whole job. The mount is also what makes the data durable across a WSL VM
+// shutdown, which is when the previous design lost its kernel modules.
+const storageUpScript = `#!/bin/sh
+# Managed by vdb setup. Mounts the VectoraDB btrfs filesystem before the engine
+# runs. Idempotent: a mounted filesystem is left alone.
 set -e
-export PATH=/usr/local/sbin:/usr/local/bin:$PATH
-IMG=/var/lib/vectoradb-zpool.img
-DEV=/dev/vectoradb-pool
+IMG=/var/lib/vectoradb-btrfs.img
+MNT=/vectoradb/branches
 SIZE="${VECTORADB_ZPOOL_SIZE:-30G}"
-MODSRC=/usr/local/lib/vectoradb/modules
 
-# Mount the datasets and put them under shared propagation.
-#
-# Sandboxed systemd services (ProtectSystem=strict, e.g. systemd-timedated)
-# clone the mount tree into a private namespace at start-up, so they hold a
-# read-only copy of every branch dataset that existed then. Unmounting only
-# propagates to those copies when the mount is shared — and WSL, unlike a normal
-# systemd boot, leaves / private, so nothing is shared by default. The copies
-# then pin the dataset forever and "vdb branch delete" fails with
-# "dataset is busy" for any branch that existed at boot.
-#
-# Making these mounts shared restores the propagation a normal Linux system
-# already has. Order matters: mount first, then share, and do both before
-# docker.service and the sandboxed services capture the tree.
-finish() {
-	zfs mount -a 2>/dev/null || true
-	mount --make-rshared /vectoradb 2>/dev/null || true
-}
+modprobe btrfs 2>/dev/null || true
+mkdir -p "$MNT"
 
-# Put the ZFS modules back before anything needs them.
-#
-# /usr/lib/modules/<rel> is an overlay whose upper layer lives in the WSL VM, not
-# on this distro's disk: it survives 'wsl --terminate' but not a VM shutdown, and
-# WSL shuts the VM down on its own once the last distro goes idle. So the modules
-# are kept under /usr/local (a real filesystem) and reinstated here at every boot.
-# Without this, ZFS quietly disappears between sessions and the pool -- the user's
-# data -- cannot be imported.
-ensure_modules() {
-	if modprobe zfs 2>/dev/null; then
-		return 0
-	fi
-	K="$(uname -r)"
-	if [ ! -d "$MODSRC/$K" ]; then
-		echo "vectoradb: no ZFS modules for kernel $K." >&2
-		echo "vectoradb: run 'vdb setup' to install them." >&2
-		exit 1
-	fi
-	mkdir -p "/usr/lib/modules/$K/extra"
-	cp -a "$MODSRC/$K/." "/usr/lib/modules/$K/extra/"
-	depmod -a "$K"
-	modprobe zfs
-}
-
-ensure_modules
-[ -f "$IMG" ] || truncate -s "$SIZE" "$IMG"
-
-# Bind the image to exactly one loop device, and expose it under a stable name.
-#
-# The device number cannot be hardcoded. Every WSL2 distro shares one kernel, so
-# /dev/loop* is a global resource: Docker Desktop and Rancher Desktop take loop
-# devices, and a distro that is unregistered while its pool is attached leaves
-# its binding behind for as long as the VM lives. Picking a fixed number
-# therefore fails with EBUSY on exactly the machines this has to work on.
-#
-# Exactly one binding also matters: two loop devices over the same file are two
-# independent block devices over the same bytes, which corrupts the pool and
-# suspends it with I/O errors.
-# Match on the backing inode, not the path. "losetup -j" compares path strings,
-# and an unregistered distro leaves its binding behind for as long as the VM
-# lives — with the very same /var/lib/vectoradb-zpool.img string, but pointing
-# at a file on a filesystem that no longer exists. Adopting one of those gives a
-# pool backed by nothing, which faults and suspends on first write.
-img_ino="$(stat -c %i "$IMG")"
-cands="$(losetup -l -O NAME,BACK-INO,BACK-FILE --noheadings 2>/dev/null |
-	awk -v f="$IMG" '$3 == f { print $1, $2 }')"
-
-devs=""
-stale=""
-while read -r d ino; do
-	[ -n "$d" ] || continue
-	if [ "$ino" = "$img_ino" ]; then
-		devs="$devs $d"
-	else
-		stale="$stale $d"
-	fi
-done <<CANDS
-$cands
-CANDS
-
-# Bindings carrying our path but a different inode belong to a distro that was
-# unregistered while its pool was attached. The kernel keeps them for the life of
-# the VM, and every distro shares that VM.
-for d in $stale; do
-	losetup -d "$d" 2>/dev/null || true
-done
-
-# A corpse we could not detach is still holding an old pool. Continuing past it
-# risks ZFS attaching to a device whose backing file is gone, which faults on
-# first write, suspends the pool and wedges the distro. Only restarting the whole
-# VM clears these — terminating this distro is not enough, because the binding
-# lives in the VM, not the distro.
-for d in $stale; do
-	if losetup -l -O NAME --noheadings 2>/dev/null | grep -qx "$d"; then
-		echo "vectoradb: $d still points at a deleted VectoraDB pool image." >&2
-		echo "vectoradb: this happens after unregistering the distro without restarting WSL." >&2
-		echo "vectoradb: run 'wsl --shutdown', then run 'vdb setup' again." >&2
-		exit 1
-	fi
-done
-
-count="$(printf '%s\n' $devs | grep -c . || true)"
-
-if [ "$count" -eq 0 ]; then
-	attached="$(losetup --find --show "$IMG")"
-elif [ "$count" -eq 1 ]; then
-	attached="$(printf '%s\n' $devs | head -1)"
-else
-	# Duplicates can only be cleaned while no pool is imported off them;
-	# detaching under a live pool is what suspends I/O.
-	if zpool list vectoradb >/dev/null 2>&1; then
-		echo "vectoradb: $IMG is attached to multiple loop devices while the pool is live." >&2
-		echo "vectoradb: refusing to continue; run 'wsl --shutdown' and retry." >&2
-		exit 1
-	fi
-	attached="$(printf '%s\n' "$devs" | head -1)"
-	for d in $devs; do
-		[ "$d" = "$attached" ] || losetup -d "$d" || true
-	done
-fi
-
-if [ -z "$attached" ]; then
-	echo "vectoradb: could not attach $IMG to a loop device." >&2
-	exit 1
-fi
-
-# The launcher passes $DEV to the engine as VECTORADB_ZPOOL_DEVICE, so it has to
-# be a name that survives the loop number changing between boots.
-ln -sfn "$attached" "$DEV"
-
-health="$(zpool list -H -o health vectoradb 2>/dev/null || true)"
-if [ -n "$health" ]; then
-	# A SUSPENDED pool lost its backing device and cannot be repaired in place;
-	# limping on just wedges the distro. A fresh boot drops every loop binding
-	# and the import, after which the normalisation above runs clean.
-	if [ "$health" = "SUSPENDED" ]; then
-		echo "vectoradb: the ZFS pool is SUSPENDED (it lost its backing device)." >&2
-		echo "vectoradb: run 'wsl --shutdown', then run 'vdb setup' again." >&2
-		exit 1
-	fi
-	finish
+if mountpoint -q "$MNT"; then
 	exit 0
 fi
 
-# Import from our device alone, never a scan of /dev. A scan can find the label
-# of an older pool on a stale binding left by an unregistered distro and import
-# onto a device whose backing file is gone — which faults on the first write and
-# suspends the pool.
-if zpool import -d "$DEV" vectoradb >/dev/null 2>&1; then
-	finish
-	exit 0
-fi
+# First boot: the engine creates the filesystem itself on its first start, so a
+# missing image is normal and not an error.
+[ -f "$IMG" ] || exit 0
 
-# No pool imported. A virgin image is the normal first-run case: leave the
-# device attached so the engine can create the pool on it.
-if ! blkid -p "$attached" 2>/dev/null | grep -q zfs_member; then
-	finish
-	exit 0
-fi
-
-# The image already holds a pool that would not import. Fail the unit; the
-# launcher refuses to run the engine when this unit is not active, which is what
-# stops the engine's "zpool create -f" from overwriting it.
-echo "vectoradb: an existing ZFS pool in $IMG could not be imported." >&2
-echo "vectoradb: refusing to continue so it cannot be overwritten." >&2
-exit 1
+# No compression: branch subvolumes are nodatacow so btrfs cannot compress them
+# anyway, and compressing a database write path costs CPU for little gain.
+mount -o loop "$IMG" "$MNT"
 `
 
-const zpoolUnit = `[Unit]
-Description=VectoraDB ZFS pool (loop-backed)
+const storageUnit = `[Unit]
+Description=VectoraDB storage (btrfs)
 After=local-fs.target
-Before=zfs-mount.service docker.service
-Wants=zfs-mount.service
+Before=docker.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/lib/vectoradb/zpool-up.sh
+ExecStart=/usr/local/lib/vectoradb/storage-up.sh
 
 [Install]
 WantedBy=multi-user.target
 `
 
-// ensureZpoolDevice installs and enables the loop-device unit above.
-func ensureZpoolDevice(name string) error {
-	step("Preparing the ZFS pool device")
-	// Masking happens here, not in installZFS, because installZFS short-circuits
-	// once ZFS works — this must also reach distros provisioned by an older
-	// build. zfs-import-scan runs `zpool import -aN -d /dev`, and that wide scan
-	// can import an old pool's label off a stale loop binding left by an
-	// unregistered distro, onto a device whose backing file is gone. Importing
-	// is this unit's job alone, scoped to the device we attached.
+// ensureStorage installs and enables the mount unit above.
+func ensureStorage(name string) error {
+	step("Preparing storage")
 	script := "set -e; mkdir -p /usr/local/lib/vectoradb; " +
-		writeFileB64("/usr/local/lib/vectoradb/zpool-up.sh", zpoolUpScript) + "; " +
-		"chmod 0755 /usr/local/lib/vectoradb/zpool-up.sh; " +
-		writeFileB64("/etc/systemd/system/vectoradb-zpool.service", zpoolUnit) + "; " +
-		"systemctl daemon-reload; " +
-		"systemctl mask zfs-import-scan.service zfs-import-cache.service >/dev/null 2>&1 || true; " +
-		"systemctl enable --now vectoradb-zpool.service"
+		writeFileB64("/usr/local/lib/vectoradb/storage-up.sh", storageUpScript) + "; " +
+		"chmod 0755 /usr/local/lib/vectoradb/storage-up.sh; " +
+		writeFileB64("/etc/systemd/system/vectoradb-storage.service", storageUnit) + "; " +
+		"systemctl daemon-reload; systemctl enable --now vectoradb-storage.service"
 	if err := wslRoot(name, script); err != nil {
-		return fmt.Errorf("preparing the ZFS pool device: %w", err)
+		return fmt.Errorf("preparing storage: %w", err)
 	}
 	// systemctl's exit code does not reliably reflect a failed --now start, and a
-	// silently dead unit means no pool device — so confirm the unit really came up.
-	return checkZpoolUnit(name)
+	// silently dead unit means the branches are not mounted — so confirm it.
+	return checkStorageUnit(name)
 }
 
-// checkZpoolUnit fails unless vectoradb-zpool.service is active.
+// checkStorageUnit fails unless vectoradb-storage.service is active.
 //
-// This is the interlock protecting existing data: when the unit cannot import a
-// pool that already exists in the image, it fails deliberately, and refusing to
-// go further is what stops the engine's `ensurePool` from reaching
-// `zpool create -f` and overwriting it.
-func checkZpoolUnit(name string) error {
-	out, _ := wslRootOut(name, "systemctl is-active vectoradb-zpool.service 2>&1 || true")
+// Running the engine without it would let Postgres write into the empty
+// directory the filesystem should have been mounted over, so the data would look
+// fine until the next boot mounted the real filesystem on top and hid it.
+func checkStorageUnit(name string) error {
+	out, _ := wslRootOut(name, "systemctl is-active vectoradb-storage.service 2>&1 || true")
 	if strings.TrimSpace(decodeWSLOutput(out)) == "active" {
 		return nil
 	}
@@ -718,279 +544,39 @@ func guestKernelRelease(name string) (string, error) {
 	return rel, nil
 }
 
-// installZFS unpacks the ZFS modules + userland built for this exact WSL kernel
-// into the distro.
+// ensureBtrfs makes the copy-on-write substrate usable.
 //
-// WSL mounts /usr/lib/modules/<rel> as an overlay: the stock module set is a
-// read-only lower layer and the upper layer lives on this distro's own disk. So
-// adding zfs.ko here is durable, private to this distro, and needs no custom
-// kernel and no machine-wide .wslconfig change — other distros (Docker Desktop,
-// Rancher Desktop) are untouched.
-func installZFS(name string) error {
-	rel, err := guestKernelRelease(name)
-	if err != nil {
-		return err
-	}
-	// Already working (a re-run, or a distro restart that reloaded the module):
-	// nothing to do. Checked against the live kernel, so a kernel bump that
-	// invalidated the modules still falls through to a reinstall.
-	if wslRoot(name, guestPath+"; modprobe zfs 2>/dev/null && zfs version >/dev/null 2>&1") == nil {
+// btrfs is in the stock WSL kernel, so there is nothing to build, download or
+// match: modprobe and the userland tools are the whole requirement. That is the
+// entire reason Windows uses btrfs rather than ZFS -- ZFS modules are
+// out-of-tree and must match the running kernel exactly, so every WSL kernel
+// needed its own prebuilt bundle, and a user on an uncovered kernel could not
+// install at all.
+func ensureBtrfs(name string) error {
+	if wslRoot(name, "modprobe btrfs && command -v mkfs.btrfs >/dev/null") == nil {
 		return nil
 	}
-	// A release from before the modules/userland split ships one combined
-	// bundle; prefer the split one but accept either, so a pinned vdb.exe keeps
-	// working against its own release.
-	bundle := bundledAsset(zfsBundleName(rel))
-	if bundle == "" {
-		bundle = bundledAsset(legacyZFSBundleName(rel))
-	}
-	if bundle == "" {
-		// Not staged: fetch the one this kernel needs. This is the first moment
-		// the right file is knowable — the installer runs before WSL may even
-		// exist, which is why it no longer tries to choose.
-		var err error
-		if bundle, err = fetchZFSBundle(rel); err != nil {
-			return err
-		}
-	}
-	step("Installing ZFS for kernel " + rel)
-	// The tarball lands modules under lib/modules/<rel>/extra (which usrmerge
-	// resolves into the writable module overlay) and userland under /usr/local.
-	// daemon-reload is required before enabling: the units arrive with the
-	// tarball, so systemd has not seen them yet.
-	//
-	// ZFS's own import units are masked, and importing is left entirely to
-	// vectoradb-zpool.service (see ensureZpoolDevice). zfs-import-cache could
-	// never work anyway — a loop-backed pool writes no /etc/zfs/zpool.cache, so
-	// its ConditionPathExists never holds — and zfs-import-scan is actively
-	// harmful here: it runs `zpool import -aN -d /dev`, and a wide scan can find
-	// an old pool's label on a loop binding left behind by an unregistered
-	// distro, importing onto a device whose backing file is gone. That faults on
-	// the first write and suspends the pool, which then wedges the distro.
-	//
-	// --keep-directory-symlink is not optional: the bundle carries a ./lib entry
-	// and /lib is a symlink to /usr/lib on a usrmerged Ubuntu. Without the flag
-	// tar replaces that symlink with a real directory and splits the distro's
-	// libraries in two.
-	// A persistent copy is kept alongside the overlay install, because the module
-	// tree is NOT durable: /usr/lib/modules/<rel> is an overlay whose upper layer
-	// lives in the WSL VM's own namespace, not on this distro's disk. It survives
-	// `wsl --terminate` but is destroyed when the VM shuts down — which WSL does
-	// on its own once the last distro goes idle. Without the copy, ZFS silently
-	// disappears between sessions and the pool cannot be imported.
-	// vectoradb-zpool.service reinstalls from modulesDir at every boot.
-	script := fmt.Sprintf("set -e; %s; tar -C / --keep-directory-symlink -xzf %q; "+
-		"mkdir -p %q/%q; cp -a /usr/lib/modules/%q/extra/. %q/%q/; "+
-		"depmod -a %q; ldconfig; modprobe zfs; "+
-		"systemctl daemon-reload; "+
-		"systemctl mask zfs-import-scan.service zfs-import-cache.service >/dev/null 2>&1 || true; "+
-		"systemctl enable --now zfs-mount.service zfs.target",
-		guestPath, winPathToMnt(bundle),
-		guestModulesDir, rel, rel, guestModulesDir, rel,
-		rel)
+	step("Installing btrfs tools")
+	script := "set -e; export DEBIAN_FRONTEND=noninteractive; " +
+		"modprobe btrfs; " +
+		"command -v mkfs.btrfs >/dev/null || { apt-get update -y; apt-get install -y btrfs-progs; }"
 	if err := wslRoot(name, script); err != nil {
-		return fmt.Errorf("installing ZFS into the distro: %w", err)
+		return fmt.Errorf("installing btrfs tools: %w", err)
 	}
 	return nil
 }
 
-// fetchZFSBundle downloads the ZFS bundle for a kernel release and caches it
-// next to vdb.exe, so a later setup (or a re-run after a distro wipe) is offline.
-//
-// It downloads to a temporary file and renames on success: a half-written bundle
-// left under the real name would be found by bundledAsset next time and fail as
-// a corrupt archive, which is a far more confusing error than a missing file.
-func fetchZFSBundle(kernelRelease string) (string, error) {
-	if err := os.MkdirAll(installDir(), 0o755); err != nil {
-		return "", err
-	}
-	step("Downloading ZFS for kernel " + kernelRelease)
-
-	// Try the split module bundle first, then the combined one. Which exists
-	// depends on the release this binary was stamped for, and a 404 on the first
-	// is the normal case against an older release rather than an error.
-	var lastErr error
-	for _, asset := range []string{zfsBundleName(kernelRelease), legacyZFSBundleName(kernelRelease)} {
-		url := releaseAssetURL(vectoradbRepo, version.Version, asset)
-		dst := filepath.Join(installDir(), asset)
-		err := downloadResumable(url, dst, asset)
-		if err == nil {
-			if err := verifyReleaseAsset(dst, asset); err != nil {
-				os.Remove(dst)
-				return "", err
-			}
-			return dst, nil
-		}
-		if !errors.Is(err, errAssetNotFound) {
-			return "", err
-		}
-		lastErr = err
-		logf("no %s in this release, trying the next name\n", asset)
-	}
-	return "", fmt.Errorf("no ZFS module bundle published for this WSL kernel (%s).\n"+
-		"VectoraDB ships the ZFS module built for one exact kernel, and yours is not among them.\n"+
-		"Check for a newer VectoraDB release, or build it yourself with `make wsl-zfs`.\n"+
-		"  (%v)", kernelRelease, lastErr)
-}
-
-// verifyReleaseAsset checks a downloaded asset against the release's SHA256SUMS.
-//
-// The bundle is unpacked into the distro and its modules are loaded into the
-// kernel, so "it came over TLS" is not on its own a good enough answer to what
-// this file is. A release with no SHA256SUMS is not a failure — releases predate
-// the file — but a listed asset whose hash disagrees is.
-func verifyReleaseAsset(path, asset string) error {
-	want, err := releaseChecksum(asset)
-	if err != nil {
-		logf("checksum lookup for %s skipped: %v\n", asset, err)
-		return nil
-	}
-	if want == "" {
-		logf("%s is not listed in SHA256SUMS; skipping verification\n", asset)
-		return nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return err
-	}
-	got := hex.EncodeToString(h.Sum(nil))
-	if !strings.EqualFold(got, want) {
-		return fmt.Errorf("checksum mismatch for %s\n  expected %s\n  got      %s\n"+
-			"The download does not match what this VectoraDB release published. "+
-			"It was discarded; re-run `vdb setup` to try again", asset, want, got)
-	}
-	logf("checksum OK for %s\n", asset)
-	return nil
-}
-
-// releaseChecksum returns the expected SHA256 for an asset, or "" when the
-// release lists no such file.
-func releaseChecksum(asset string) (string, error) {
-	resp, err := http.Get(releaseAssetURL(vectoradbRepo, version.Version, "SHA256SUMS"))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("SHA256SUMS: %s", resp.Status)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return "", err
-	}
-	return checksumFor(string(body), asset), nil
-}
-
-// downloadResumable fetches url to dst, resuming and retrying on a dropped
-// connection.
-//
-// This matters more than it looks: the bundle is ~85 MB, and a single dropped
-// connection on an ordinary home network otherwise fails the whole install with
-// a wsarecv error and leaves a half-created distro behind. Progress is kept in a
-// .part file so a retry continues rather than starting again.
-func downloadResumable(url, dst, asset string) error {
-	part := dst + ".part"
-	const attempts = 4
-
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		var have int64
-		if fi, err := os.Stat(part); err == nil {
-			have = fi.Size()
-		}
-
-		req, err := http.NewRequest(http.MethodGet, url, nil)
-		if err != nil {
-			return err
-		}
-		if have > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
-		}
-
-		resp, err := (&http.Client{Timeout: 30 * time.Minute}).Do(req)
-		if err != nil {
-			lastErr = err
-			logf("download attempt %d/%d failed: %v\n", attempt, attempts, err)
-			time.Sleep(time.Duration(attempt) * 2 * time.Second)
-			continue
-		}
-
-		switch resp.StatusCode {
-		case http.StatusNotFound:
-			resp.Body.Close()
-			return fmt.Errorf("%w: %s", errAssetNotFound, url)
-		case http.StatusOK:
-			// The server ignored our Range (or we had nothing): start over.
-			have = 0
-		case http.StatusPartialContent:
-			// Resuming where we left off.
-		default:
-			resp.Body.Close()
-			lastErr = fmt.Errorf("%s", resp.Status)
-			logf("download attempt %d/%d: %s\n", attempt, attempts, resp.Status)
-			time.Sleep(time.Duration(attempt) * 2 * time.Second)
-			continue
-		}
-
-		flags := os.O_CREATE | os.O_WRONLY
-		if have > 0 {
-			flags |= os.O_APPEND
-		} else {
-			flags |= os.O_TRUNC
-		}
-		f, err := os.OpenFile(part, flags, 0o644)
-		if err != nil {
-			resp.Body.Close()
-			return err
-		}
-		_, copyErr := io.Copy(f, resp.Body)
-		resp.Body.Close()
-		if closeErr := f.Close(); copyErr == nil {
-			copyErr = closeErr
-		}
-		if copyErr != nil {
-			lastErr = copyErr
-			logf("download attempt %d/%d interrupted: %v\n", attempt, attempts, copyErr)
-			fmt.Printf("  download interrupted, resuming (%d/%d)…\n", attempt, attempts)
-			time.Sleep(time.Duration(attempt) * 2 * time.Second)
-			continue
-		}
-		if err := os.Rename(part, dst); err != nil {
-			return fmt.Errorf("saving %s: %w", asset, err)
-		}
-		return nil
-	}
-	return fmt.Errorf("downloading %s failed after %d attempts: %w\n"+
-		"Check your connection and re-run `vdb setup` — the partial download is resumed, not restarted",
-		asset, attempts, lastErr)
-}
-
-// verifyZFS is the gate on the whole approach: modules built for a different
-// kernel load nowhere, and every later failure would be a confusing symptom of
-// that one cause.
-func verifyZFS(name string) error {
-	rel, err := guestKernelRelease(name)
-	if err != nil {
-		return err
-	}
-	if err := wslRoot(name, guestPath+"; modprobe zfs && zfs version >/dev/null && zpool version >/dev/null"); err != nil {
-		return fmt.Errorf("ZFS is not usable in the %q distro (kernel %s): %w\n"+
-			"The ZFS modules must be built for this exact kernel. Stage %s next to vdb.exe\n"+
-			"and re-run `vdb setup`, or rebuild it with `make wsl-zfs`",
-			name, rel, err, zfsBundleName(rel))
+// verifyBtrfs is the gate before the engine runs: without a working btrfs there
+// is no copy-on-write, and every later failure would be a confusing symptom of
+// this one cause.
+func verifyBtrfs(name string) error {
+	if err := wslRoot(name, "modprobe btrfs && mkfs.btrfs --version >/dev/null"); err != nil {
+		return fmt.Errorf("btrfs is not usable in the %q distro: %w\n"+
+			"btrfs ships in the WSL kernel, so this is unexpected — see %s",
+			name, err, setupLogPath())
 	}
 	return nil
 }
-
-// stageImageContext copies the Postgres image build context into the distro.
-// The engine discovers a build context relative to the working directory, which
-// finds nothing for a user who installed vdb rather than cloning the repo; the
-// forwarded environment points VECTORADB_IMAGE_CONTEXT here instead.
 func stageImageContext(name string) error {
 	// The prebuilt distro image already carries the context (and the built
 	// image), so there is nothing to stage.
@@ -1026,13 +612,6 @@ func installGuestBinaryWSL(name string) error {
 	src := winPathToMnt(bin)
 	return wslRoot(name, fmt.Sprintf("install -m 0755 %q /usr/local/bin/vdb", src))
 }
-
-// vectoradbRepo is where setup fetches assets the installer did not stage.
-const vectoradbRepo = "SauravYadav12/vectoraDB"
-
-// errAssetNotFound distinguishes "this release has no such asset" from a real
-// download failure, so callers can try an alternative name rather than give up.
-var errAssetNotFound = errors.New("release asset not found")
 
 // installDir is the directory holding vdb.exe — where the installer stages
 // assets and where setup caches anything it downloads.

@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Builds the prebuilt VectoraDB WSL2 distro image and attaches it to the release.
+# Builds the prebuilt Windows distro image: one asset, every WSL kernel.
 #
-# The image carries everything that does not depend on the WSL kernel: Docker,
-# the ZFS userland, the engine binary, and the container images. `vdb setup` then
-# imports it, adds the ~2 MB kernel-matched ZFS modules, and starts -- instead of
-# running apt, a docker build and three registry pulls on the user's machine.
+# This used to also build ZFS kernel modules, one job per kernel, because ZFS is
+# out-of-tree and vermagic ties a module to one exact kernel. That is why a
+# release could only ever cover the kernels someone had thought to list, and why
+# users on any other kernel hit "no ZFS module bundle published for this WSL
+# kernel". Windows now stores branches on btrfs, which is in the stock WSL
+# kernel, so there is nothing kernel-specific left to build and the matrix is
+# gone. wsl-zfs.yml still builds ZFS on demand if it is ever needed again.
 name: wsl-distro
 
 on:
@@ -21,9 +24,9 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  distro:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,28 +34,32 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      # `make release-linux` runs `npm ci`, which re-downloads the whole
+      # dependency tree on a cold runner. Cache it on the lockfile.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
 
-      # The image bakes in the engine binary and the ZFS userland, so both must
-      # exist before it is assembled.
-      - name: Build the engine binaries
-        run: make release VERSION="${TAG#v}"
+      # Parallel gzip. build.sh compresses ~1.7 GB, and gzip is single-threaded;
+      # pigz produces an identical-format, same-size archive using every core.
+      - name: Install pigz
+        run: sudo apt-get install -y --no-install-recommends pigz
+
+      # Only the Linux binary: it is the one baked into the image, and
+      # release.yml publishes the full cross-compiled set separately.
+      - name: Build the engine binary
+        run: make release-linux VERSION="${TAG#v}"
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
-
-      - name: Build ZFS (modules + userland)
-        run: make wsl-zfs
 
       - name: Build the distro image
         run: make wsl-distro
 
-      - name: Summarize
-        run: |
-          echo "kernel release: $(cat dist/vectoradb-zfs.release)"
-          ls -la dist/
-
-      # Appended rather than replaced: release.yml publishes SHA256SUMS for the
-      # binaries, and this job adds the assets it built. Both are needed for the
-      # installer and `vdb setup` to verify everything they download.
+      # Appended, not replaced: release.yml publishes sums for the binaries.
+      # Every asset the installer or setup downloads must be listed, or
+      # verification silently skips it.
       - name: Checksums
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,15 +67,14 @@ jobs:
         run: |
           cd dist
           gh release download "$TAG" -p SHA256SUMS -O existing.txt 2>/dev/null || : > existing.txt
-          sha256sum vectoradb-distro.tar.gz vectoradb-zfs-modules-*.tar.gz > mine.txt
-          # Keep one line per asset, preferring the freshly built ones.
+          sha256sum vectoradb-distro.tar.gz > mine.txt
           awk '{print $2}' mine.txt > names.txt
           grep -vFf names.txt existing.txt > SHA256SUMS || : > SHA256SUMS
           cat mine.txt >> SHA256SUMS
           sort -k2 -o SHA256SUMS SHA256SUMS
           cat SHA256SUMS
 
-      - name: Attach to release
+      - name: Attach the distro image
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
@@ -77,6 +83,4 @@ jobs:
             gh release create "$TAG" --prerelease --generate-notes --title "$TAG"
           gh release upload "$TAG" \
             dist/vectoradb-distro.tar.gz \
-            dist/vectoradb-zfs-modules-*.tar.gz \
-            dist/vectoradb-zfs.release \
             dist/SHA256SUMS --clobber

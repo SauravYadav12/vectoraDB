@@ -155,8 +155,9 @@ func Init() error {
 	if ContainerState("main") == "running" {
 		return InstallLedger("main") // already up — ensure the ledger is present
 	}
-	if !datasetExists(dataset("main")) {
-		if err := run("zfs", "create", "-p", dataset("main")); err != nil {
+	store := activeStorage()
+	if !store.exists("main") {
+		if err := store.createEmpty("main"); err != nil {
 			return err
 		}
 	}
@@ -215,7 +216,7 @@ func Create(name, parent string) error {
 	if parent == "" {
 		parent = "main"
 	}
-	if datasetExists(dataset(name)) {
+	if activeStorage().exists(name) {
 		return fmt.Errorf("branch %q already exists", name)
 	}
 	if err := ensureNetwork(); err != nil {
@@ -226,11 +227,7 @@ func Create(name, parent string) error {
 	quiet("docker", "exec", "-e", "PGPASSWORD="+pgPassword, container(parent),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-c", "CHECKPOINT;")
 
-	snap := snapFor(parent, name)
-	if err := run("zfs", "snapshot", snap); err != nil {
-		return err
-	}
-	if err := run("zfs", "clone", snap, dataset(name)); err != nil {
+	if err := activeStorage().clone(parent, name); err != nil {
 		return err
 	}
 	if err := run("chown", "-R", pgUID+":"+pgUID, mountpoint(name)); err != nil {
@@ -249,18 +246,21 @@ func Delete(name string) error {
 		return fmt.Errorf("refusing to delete the primary branch 'main'")
 	}
 	quiet("docker", "rm", "-f", container(name))
-	if err := run("zfs", "destroy", "-R", dataset(name)); err != nil {
-		return err
-	}
-	// The origin snapshot lives on the parent; parent is "main" for MVP branches.
-	quiet("zfs", "destroy", snapFor("main", name))
-	return nil
+	return activeStorage().destroy(name)
 }
 
-// List shows branch datasets (with used/referenced space) and their containers.
+// List shows the branches and their containers.
 func List() error {
-	fmt.Println("=== branch datasets (USED shows copy-on-write delta) ===")
-	if err := run("zfs", "list", "-r", "-o", "name,used,refer,mountpoint", datasetBase); err != nil {
+	store := activeStorage()
+	// The heading names what the driver can actually report: ZFS gives a
+	// per-branch copy-on-write delta, btrfs does not without quota groups, and
+	// promising a column that is not there reads as a bug.
+	if store.name() == "zfs" {
+		fmt.Println("=== branch datasets (USED shows copy-on-write delta) ===")
+	} else {
+		fmt.Println("=== branches (copy-on-write subvolumes) ===")
+	}
+	if err := store.list(); err != nil {
 		return err
 	}
 	fmt.Println("\n=== postgres containers ===")
@@ -544,27 +544,20 @@ type BranchInfo struct {
 // Branches returns structured info for every branch (including main), enriched
 // with container state, connections, and copy-on-write size.
 func Branches() ([]BranchInfo, error) {
-	out, err := capture("zfs", "list", "-H", "-o", "name,used,refer", "-r", datasetBase)
+	usages, err := activeStorage().usage()
 	if err != nil {
 		return nil, err
 	}
 	var infos []BranchInfo
-	for _, line := range strings.Split(out, "\n") {
-		if line == "" {
-			continue
-		}
-		f := strings.Split(line, "\t")
-		if len(f) < 3 || f[0] == datasetBase {
-			continue
-		}
-		name := strings.TrimPrefix(f[0], datasetBase+"/")
+	for _, u := range usages {
+		name := u.Name
 		if strings.Contains(name, "/") {
 			continue // only direct children
 		}
 		bi := BranchInfo{
 			Name:    name,
-			Used:    f[1],
-			Refer:   f[2],
+			Used:    u.Used,
+			Refer:   u.Refer,
 			Primary: name == "main",
 			Agent:   strings.HasPrefix(name, "agent-"),
 			State:   ContainerState(name),
@@ -588,16 +581,13 @@ type Storage struct {
 	Avail string `json:"avail"`
 }
 
-// StorageInfo reports ZFS pool usage.
+// StorageInfo reports how much of the copy-on-write substrate is in use.
 func StorageInfo() Storage {
-	out, err := capture("zfs", "list", "-H", "-o", "used,avail", "vectoradb")
+	used, avail, err := activeStorage().capacity()
 	if err != nil {
 		return Storage{}
 	}
-	if f := strings.Fields(out); len(f) >= 2 {
-		return Storage{Used: f[0], Avail: f[1]}
-	}
-	return Storage{}
+	return Storage{Used: used, Avail: avail}
 }
 
 // --- auto-suspend / auto-resume ---
@@ -640,7 +630,7 @@ func EnsureRunning(name string) (string, error) {
 	case "absent":
 		// No container. If the dataset survives (e.g. after a full stop),
 		// recreate the container on it; otherwise the branch truly doesn't exist.
-		if !datasetExists(dataset(name)) {
+		if !activeStorage().exists(name) {
 			return "", fmt.Errorf("branch %q does not exist", name)
 		}
 		if err := startContainer(name, name == "main"); err != nil {
