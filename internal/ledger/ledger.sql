@@ -32,8 +32,13 @@ CREATE TABLE IF NOT EXISTS vdb.schema_ledger (
   object_identity text,          -- 'public.orders'
   statement       text,          -- the SQL (current_query)
   status          text NOT NULL, -- 'APPLIED' | 'FLAGGED' | 'BLOCKED'
-  risk            text           -- 'drop' | 'type-change' | 'policy' | NULL
+  risk            text,          -- 'drop' | 'type-change' | 'policy' | NULL
+  prev_hash       text,          -- row_hash of the previous ledger row
+  row_hash        text           -- sha256 over this row's fields, chaining prev_hash
 );
+-- Add the chain columns to a ledger created before tamper-evidence existed.
+ALTER TABLE vdb.schema_ledger ADD COLUMN IF NOT EXISTS prev_hash text;
+ALTER TABLE vdb.schema_ledger ADD COLUMN IF NOT EXISTS row_hash  text;
 CREATE INDEX IF NOT EXISTS schema_ledger_at_idx ON vdb.schema_ledger (at DESC);
 
 -- Guardrail policy: op (command tag) -> action ('block' | 'flag' | 'allow').
@@ -57,10 +62,13 @@ $$;
 -- Should this DDL be recorded, or is it internal noise?
 CREATE OR REPLACE FUNCTION vdb._skip(schema_name text, command_tag text)
 RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+  -- GRANT/REVOKE and function DDL are recorded (a function that reads sensitive
+  -- data, or a privilege change, is exactly what an audit wants). Only the
+  -- ledger's own plumbing and pure-noise tags are skipped.
   SELECT schema_name = 'vdb'   -- the ledger's own objects
-      OR command_tag IN ('ALTER DATABASE','GRANT','REVOKE','COMMENT','CREATE EXTENSION',
+      OR command_tag IN ('ALTER DATABASE','COMMENT','CREATE EXTENSION',
                          'CREATE EVENT TRIGGER','DROP EVENT TRIGGER','ALTER EVENT TRIGGER',
-                         'CREATE FUNCTION','ALTER FUNCTION','DROP FUNCTION','CREATE SCHEMA');
+                         'CREATE SCHEMA');
 $$;
 
 -- ddl_command_start: enforce guardrails BEFORE the command runs.
@@ -108,6 +116,8 @@ BEGIN
       st := 'FLAGGED'; rk := 'type-change';
     ELSIF r.command_tag = 'ALTER TABLE' AND q ~* 'drop\s+column' THEN
       st := 'FLAGGED'; rk := 'drop-column';
+    ELSIF r.command_tag IN ('CREATE FUNCTION','ALTER FUNCTION') AND q ~* 'security\s+definer' THEN
+      st := 'FLAGGED'; rk := 'security-definer';
     END IF;
     INSERT INTO vdb.schema_ledger
       (actor,actor_kind,tool,session,branch,command_tag,object_type,object_identity,statement,status,risk)
@@ -128,7 +138,7 @@ BEGIN
   -- like the sequence, primary-key index, or toast table).
   FOR r IN SELECT * FROM pg_event_trigger_dropped_objects() WHERE NOT is_temporary AND original LOOP
     IF vdb._skip(r.schema_name, TG_TAG) THEN CONTINUE; END IF;
-    IF r.object_type NOT IN ('table','view','index','sequence','schema','type','materialized view') THEN
+    IF r.object_type NOT IN ('table','view','index','sequence','schema','type','materialized view','function') THEN
       CONTINUE;
     END IF;
     INSERT INTO vdb.schema_ledger
@@ -138,6 +148,57 @@ BEGIN
   END LOOP;
 END;
 $$;
+
+-- ── Tamper-evidence ─────────────────────────────────────────────────────────
+-- Every row is hash-chained to the one before it: row_hash = sha256(prev_hash ||
+-- this row's fields). Deleting or editing a row breaks every hash after it, and
+-- `vdb ledger verify` recomputes the chain to catch it. Detection holds no matter
+-- who did it; append-only enforcement (below) blocks the ordinary path. Full
+-- prevention against a superuser needs the non-superuser app role (roadmap).
+
+-- _ledger_hash is the single source of truth for a row's hash, used by both the
+-- insert trigger and verification, so the two can never drift. `at` is rendered
+-- in UTC so the hash is independent of the verifying session's timezone.
+CREATE OR REPLACE FUNCTION vdb._ledger_hash(r vdb.schema_ledger) RETURNS text
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT encode(sha256(convert_to(
+    coalesce(r.prev_hash,'')      || '|' || coalesce(r.id::text,'')              || '|' ||
+    coalesce((r.at AT TIME ZONE 'UTC')::text,'')                                 || '|' ||
+    coalesce(r.actor,'')          || '|' || coalesce(r.actor_kind,'')            || '|' ||
+    coalesce(r.tool,'')           || '|' || coalesce(r.session,'')               || '|' ||
+    coalesce(r.branch,'')         || '|' || coalesce(r.command_tag,'')           || '|' ||
+    coalesce(r.object_type,'')    || '|' || coalesce(r.object_identity,'')       || '|' ||
+    coalesce(r.statement,'')      || '|' || coalesce(r.status,'')                || '|' ||
+    coalesce(r.risk,''), 'UTF8')), 'hex');
+$$;
+
+CREATE OR REPLACE FUNCTION vdb.chain_row() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE prev text;
+BEGIN
+  -- Serialize appends so two concurrent inserts can't chain off the same row.
+  PERFORM pg_advisory_xact_lock(hashtext('vdb.schema_ledger'));
+  SELECT row_hash INTO prev FROM vdb.schema_ledger ORDER BY id DESC LIMIT 1;
+  NEW.prev_hash := coalesce(prev, '');
+  NEW.row_hash  := vdb._ledger_hash(NEW);
+  RETURN NEW;
+END;
+$$;
+CREATE OR REPLACE TRIGGER vdb_chain BEFORE INSERT ON vdb.schema_ledger
+  FOR EACH ROW EXECUTE FUNCTION vdb.chain_row();
+
+-- Append-only: the ledger records history, so history cannot be rewritten.
+CREATE OR REPLACE FUNCTION vdb.deny_change() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'vdb.schema_ledger is append-only — its history cannot be modified';
+END;
+$$;
+CREATE OR REPLACE TRIGGER vdb_append_only BEFORE UPDATE OR DELETE ON vdb.schema_ledger
+  FOR EACH ROW EXECUTE FUNCTION vdb.deny_change();
+CREATE OR REPLACE TRIGGER vdb_no_truncate BEFORE TRUNCATE ON vdb.schema_ledger
+  FOR EACH STATEMENT EXECUTE FUNCTION vdb.deny_change();
+REVOKE UPDATE, DELETE, TRUNCATE ON vdb.schema_ledger FROM PUBLIC;
 
 CREATE EVENT TRIGGER vdb_guard_start ON ddl_command_start
   EXECUTE FUNCTION vdb.guard_ddl_start();
