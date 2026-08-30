@@ -63,20 +63,20 @@ func HAEnable() error {
 		return err
 	}
 
-	// 2. Fresh standby dataset.
+	// 2. Fresh standby storage.
 	quiet("docker", "rm", "-f", container("standby"))
-	quiet("zfs", "destroy", "-r", standbyDataset)
-	if err := run("zfs", "create", standbyDataset); err != nil {
+	store := activeStorage()
+	if err := store.resetStandby(); err != nil {
 		return err
 	}
-	if err := run("chown", "-R", pgUID+":"+pgUID, standbyMount); err != nil {
+	if err := run("chown", "-R", pgUID+":"+pgUID, store.standbyPath()); err != nil {
 		return err
 	}
 
 	// 3. Base backup from the primary, with recovery config (-R) and streaming WAL.
 	if err := run("docker", "run", "--rm", "--user", pgUID, "--network", network,
 		"-e", "PGPASSWORD="+pgPassword,
-		"-v", standbyMount+":/data",
+		"-v", store.standbyPath()+":/data",
 		image,
 		"pg_basebackup", "-h", primary, "-U", pgUser, "-D", "/data/pgdata",
 		"-R", "-X", "stream", "-c", "fast"); err != nil {
@@ -90,7 +90,7 @@ func HAEnable() error {
 		"-p", "0:5432",
 		"-e", "PGPASSWORD="+pgPassword, // used by the WAL receiver to authenticate
 		"-e", "PGDATA=/var/lib/postgresql/data/pgdata",
-		"-v", standbyMount+":/var/lib/postgresql/data",
+		"-v", store.standbyPath()+":/var/lib/postgresql/data",
 		image, "postgres", "-c", "listen_addresses=*"); err != nil {
 		return err
 	}
@@ -142,6 +142,6 @@ func HAFailover() error {
 // HADisable tears down the standby and resets primary routing to "main".
 func HADisable() error {
 	quiet("docker", "rm", "-f", container("standby"))
-	quiet("zfs", "destroy", "-r", standbyDataset)
+	activeStorage().destroyStandby()
 	return setPrimary("main")
 }

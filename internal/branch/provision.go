@@ -65,35 +65,11 @@ func poolExists() bool {
 	return exec.Command("sudo", "zpool", "list", "-H", "-o", "name", pool).Run() == nil
 }
 
-// ensurePool guarantees the ZFS pool and the base branches dataset exist,
-// creating the pool on a loopback file (or a given block device) if absent.
+// ensurePool makes the copy-on-write substrate ready. Which substrate that is
+// depends on the configured driver: ZFS on macOS and Linux, btrfs on Windows,
+// where an out-of-tree module cannot be relied on. See storage.go.
 func ensurePool() error {
-	if _, err := exec.LookPath("zfs"); err != nil {
-		return fmt.Errorf("ZFS is not installed — install zfsutils and retry")
-	}
-	if poolExists() {
-		if !datasetExists(datasetBase) {
-			return run("zfs", "create", "-p", datasetBase)
-		}
-		return nil
-	}
-
-	vdev := envOr(envZpoolDevice, defaultZpoolFile)
-	// A file vdev is created on demand; a real block device is used as-is.
-	if !strings.HasPrefix(vdev, "/dev/") {
-		if _, err := os.Stat(vdev); os.IsNotExist(err) {
-			fmt.Printf("Creating a %s ZFS pool image at %s (first run only)…\n",
-				envOr(envZpoolSize, defaultZpoolSize), vdev)
-			if err := run("truncate", "-s", envOr(envZpoolSize, defaultZpoolSize), vdev); err != nil {
-				return fmt.Errorf("creating pool image: %w", err)
-			}
-		}
-	}
-	fmt.Printf("Creating ZFS pool %q on %s…\n", pool, vdev)
-	if err := run("zpool", "create", "-f", pool, vdev); err != nil {
-		return fmt.Errorf("creating ZFS pool: %w", err)
-	}
-	return run("zfs", "create", "-p", datasetBase)
+	return activeStorage().ensureReady()
 }
 
 func imageExists() bool {

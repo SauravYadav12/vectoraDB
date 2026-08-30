@@ -7,7 +7,6 @@ package host
 
 import (
 	"bytes"
-	"path"
 	"strings"
 	"unicode/utf16"
 )
@@ -30,36 +29,29 @@ func resolveWSLDistro(override string) string {
 	return defaultWSLDistro
 }
 
-// guestPATH is Debian's default root PATH. The engine resolves zfs, zpool and
-// docker with exec.LookPath, and ZFS installs under /usr/local — but the
+// guestPATH is Debian's default root PATH. The engine resolves its storage
+// tools and docker with exec.LookPath, and ZFS installs under /usr/local -- but the
 // environment `wsl.exe -- env` inherits depends on how the distro was created,
 // so the forwarded command is given an explicit PATH rather than a hopeful one.
 const guestPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-// guestZpoolDevice is the block device backing the ZFS pool inside the distro.
-//
-// The engine's default is a plain file vdev, which the WSL2 kernel cannot back a
-// pool with — `zpool create` on a file fails there with "no such pool or
-// dataset", while the same file behind a loop device works. So setup attaches
-// the pool image to a loop device and points the engine here through
-// VECTORADB_ZPOOL_DEVICE, a knob the engine already honours.
-//
-// It is a symlink, not a loop device directly: every WSL2 distro shares one
-// kernel, so loop numbers are global and contended (Docker Desktop and Rancher
-// Desktop take them, and an unregistered distro leaves its binding behind).
-// vectoradb-zpool.service picks whichever device is free and repoints this name.
-const guestZpoolDevice = "/dev/vectoradb-pool"
-
 // guestEnv is the environment every forwarded command runs with inside the
 // distro: the in-guest marker (so the guest vdb never forwards again), a PATH
-// that finds the ZFS userland, the staged docker build context, and the
-// loop-backed pool vdev.
+// that finds the storage tools, the staged docker build context, and the
+// copy-on-write driver.
+//
+// Windows uses btrfs. ZFS is out-of-tree, so its module has to match the running
+// WSL kernel exactly and every kernel needs its own prebuilt bundle — and
+// Microsoft ships new WSL kernels often enough that users end up on one nobody
+// has built for, unable to install at all. btrfs is in the stock kernel, so it
+// works on every WSL kernel with nothing to prebuild. macOS and Linux keep ZFS,
+// where the module is a solved problem and the behaviour is proven.
 func guestEnv() []string {
 	return []string{
 		envInGuest + "=1",
 		"PATH=" + guestPATH,
 		"VECTORADB_IMAGE_CONTEXT=" + guestImageContext,
-		"VECTORADB_ZPOOL_DEVICE=" + guestZpoolDevice,
+		"VECTORADB_STORAGE=btrfs",
 	}
 }
 
@@ -118,82 +110,13 @@ func winPathToMnt(p string) string {
 	return p
 }
 
-// parseKernelRelease extracts the kernel release from `uname -r` output (or from
-// the .release file shipped with the ZFS bundle), tolerating the UTF-16LE
-// wrapping and trailing newlines that wsl.exe adds.
+// parseKernelRelease extracts the kernel release from `uname -r` output,
+// tolerating the UTF-16LE wrapping and trailing newlines that wsl.exe adds.
 func parseKernelRelease(raw []byte) string {
 	return strings.TrimSpace(decodeWSLOutput(raw))
 }
 
-// zfsBundleName is the ZFS module artifact for a kernel release. The release is
-// part of the filename because the modules only load against the exact kernel
-// they were built for — a stale bundle must be a missing file, not a silent
-// mismatch.
-//
-// Modules only: the ZFS userland is kernel-independent and ships inside the
-// distro image, which is what keeps this download ~2 MB rather than ~80 MB.
-func zfsBundleName(kernelRelease string) string {
-	return "vectoradb-zfs-modules-" + strings.TrimSpace(kernelRelease) + ".tar.gz"
-}
-
-// legacyZFSBundleName is the pre-split artifact, carrying modules and userland
-// together. Releases before the split only have this one, so a vdb.exe pinned to
-// such a release must still be able to find it.
-func legacyZFSBundleName(kernelRelease string) string {
-	return "vectoradb-zfs-" + strings.TrimSpace(kernelRelease) + ".tar.gz"
-}
-
-// guestModulesDir is the durable home for the ZFS kernel modules inside the
-// distro, holding <rel>/*.ko.
-//
-// They cannot simply live in /usr/lib/modules/<rel>: that path is an overlay
-// whose upper layer belongs to the WSL VM rather than to this distro's disk. It
-// outlives `wsl --terminate` but not a VM shutdown, which WSL performs by itself
-// once the last distro is idle — so modules installed only there vanish between
-// sessions, taking the pool with them. vectoradb-zpool.service copies them back
-// into the overlay on every boot.
-const guestModulesDir = "/usr/local/lib/vectoradb/modules"
-
-// distroImageName is the prebuilt distro: Ubuntu with Docker, the ZFS userland,
+// distroImageName is the prebuilt distro: Ubuntu with Docker, btrfs tools,
 // the engine and the container images already in place. Importing it replaces
 // an apt install, a docker build and three registry pulls on the user's machine.
 const distroImageName = "vectoradb-distro.tar.gz"
-
-// checksumFor finds an asset's SHA256 in a sha256sum-style listing, or "" if the
-// listing does not mention it.
-//
-// Lines are "<64 hex>  <name>", with an optional leading "*" on the name for
-// binary mode. Matching is on the base name so a listing generated with paths
-// still resolves.
-func checksumFor(listing, asset string) string {
-	for _, ln := range strings.Split(strings.ReplaceAll(listing, "\r\n", "\n"), "\n") {
-		fields := strings.Fields(strings.TrimSpace(ln))
-		if len(fields) != 2 || len(fields[0]) != 64 {
-			continue
-		}
-		name := strings.TrimPrefix(fields[1], "*")
-		if name == asset || path.Base(name) == asset {
-			return strings.ToLower(fields[0])
-		}
-	}
-	return ""
-}
-
-// releaseAssetURL is where `vdb setup` fetches an asset the installer did not
-// stage. The ZFS bundle is fetched here rather than by install.ps1 because only
-// setup knows which one is needed: it has just created the distro, so it can ask
-// the running kernel, whereas the installer would need WSL to already exist.
-//
-// The version is the one stamped into this binary, so a v0.4.0 vdb.exe takes
-// v0.4.0 assets and never silently drifts onto a newer release's. An unstamped
-// dev build has no matching release, so it falls back to latest.
-func releaseAssetURL(repo, version, asset string) string {
-	v := strings.TrimSpace(version)
-	if v == "" || strings.Contains(v, "dev") {
-		return "https://github.com/" + repo + "/releases/latest/download/" + asset
-	}
-	if !strings.HasPrefix(v, "v") {
-		v = "v" + v
-	}
-	return "https://github.com/" + repo + "/releases/download/" + v + "/" + asset
-}
