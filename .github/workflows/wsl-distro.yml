@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Builds the Windows release assets: the ZFS kernel modules (one set per
-# supported WSL kernel) and the prebuilt distro image (one, shared).
+# Builds the prebuilt Windows distro image: one asset, every WSL kernel.
 #
-# The split matters. ZFS modules are tied to one exact kernel by vermagic, so
-# every kernel a user might run needs its own ~2 MB bundle. Everything else --
-# Docker, the ZFS userland, the engine, the container images -- is
-# kernel-independent and ships once in a ~740 MB image.
-#
-# Microsoft ships new WSL kernels regularly and `wsl --update` moves users onto
-# them, so a release covering only one kernel strands everyone else with
-# "no ZFS module bundle published for this WSL kernel". Add the kernel to the
-# matrix below and re-run this workflow to cover it.
+# This used to also build ZFS kernel modules, one job per kernel, because ZFS is
+# out-of-tree and vermagic ties a module to one exact kernel. That is why a
+# release could only ever cover the kernels someone had thought to list, and why
+# users on any other kernel hit "no ZFS module bundle published for this WSL
+# kernel". Windows now stores branches on btrfs, which is in the stock WSL
+# kernel, so there is nothing kernel-specific left to build and the matrix is
+# gone. wsl-zfs.yml still builds ZFS on demand if it is ever needed again.
 name: wsl-distro
 
 on:
@@ -27,58 +24,7 @@ permissions:
   contents: write
 
 jobs:
-  # One job per kernel. Each is a full kernel build, so they run in parallel:
-  # sequentially this would be hours.
-  modules:
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        # microsoft/WSL2-Linux-Kernel tags. `primary` marks the one whose ZFS
-        # userland is baked into the distro image -- the userland is identical
-        # across kernels (same ZFS_TAG), so exactly one entry needs it.
-        include:
-          - kernel: linux-msft-wsl-6.6.87.2
-            primary: true
-          - kernel: linux-msft-wsl-6.18.33.2
-          - kernel: linux-msft-wsl-6.18.40.1
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Build ZFS for ${{ matrix.kernel }}
-        env:
-          KERNEL_TAG: ${{ matrix.kernel }}
-        run: |
-          set -eux
-          # Derive the kernel release from the tag rather than stating it twice:
-          # linux-msft-wsl-6.18.33.2 -> 6.18.33.2-microsoft-standard-WSL2.
-          # build.sh asserts the built kernel matches, so a wrong guess fails
-          # loudly instead of shipping modules that cannot load.
-          EXPECT_RELEASE="${KERNEL_TAG#linux-msft-wsl-}-microsoft-standard-WSL2"
-          export EXPECT_RELEASE
-          make wsl-zfs
-
-      - name: Attach the module bundle
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          gh release view "$TAG" >/dev/null 2>&1 ||
-            gh release create "$TAG" --prerelease --generate-notes --title "$TAG"
-          gh release upload "$TAG" dist/vectoradb-zfs-modules-*.tar.gz --clobber
-
-      # Handed to the distro job, which bakes it in.
-      - uses: actions/upload-artifact@v4
-        if: matrix.primary
-        with:
-          name: zfs-userland
-          path: dist/vectoradb-zfs-userland.tar.gz
-
   distro:
-    needs: modules
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -89,11 +35,6 @@ jobs:
         with:
           go-version: '1.26'
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: zfs-userland
-          path: dist
-
       # The image bakes in the engine binary, so it has to exist first.
       - name: Build the engine binaries
         run: make release VERSION="${TAG#v}"
@@ -103,9 +44,9 @@ jobs:
       - name: Build the distro image
         run: make wsl-distro
 
-      # Appended, not replaced: release.yml publishes sums for the binaries and
-      # the modules jobs add theirs. Every asset the installer or setup
-      # downloads must be listed, or verification silently skips it.
+      # Appended, not replaced: release.yml publishes sums for the binaries.
+      # Every asset the installer or setup downloads must be listed, or
+      # verification silently skips it.
       - name: Checksums
         env:
           GH_TOKEN: ${{ github.token }}
@@ -113,8 +54,7 @@ jobs:
         run: |
           cd dist
           gh release download "$TAG" -p SHA256SUMS -O existing.txt 2>/dev/null || : > existing.txt
-          gh release download "$TAG" -p 'vectoradb-zfs-modules-*.tar.gz' 2>/dev/null || true
-          sha256sum vectoradb-distro.tar.gz vectoradb-zfs-modules-*.tar.gz > mine.txt
+          sha256sum vectoradb-distro.tar.gz > mine.txt
           awk '{print $2}' mine.txt > names.txt
           grep -vFf names.txt existing.txt > SHA256SUMS || : > SHA256SUMS
           cat mine.txt >> SHA256SUMS
@@ -126,7 +66,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --prerelease --generate-notes --title "$TAG"
           gh release upload "$TAG" \
             dist/vectoradb-distro.tar.gz \
-            dist/vectoradb-zfs.release \
             dist/SHA256SUMS --clobber
