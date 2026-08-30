@@ -35,7 +35,8 @@ func TestIsELF(t *testing.T) {
 
 func TestBundledLinuxBinaryPrefersCache(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	t.Setenv("HOME", home)        // os.UserHomeDir on unix
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	cache := filepath.Join(home, ".vectoradb")
 	if err := os.MkdirAll(cache, 0o755); err != nil {
 		t.Fatal(err)
