@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vectoradb"
+version = "0.6.0"
+description = "Python client for VectoraDB — serverless Postgres with instant branching and a tamper-evident schema ledger."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [{ name = "VectoraDB" }]
+urls = { Homepage = "https://github.com/vectoradb/vectoraDB" }
+
+[tool.setuptools]
+packages = ["vectoradb"]

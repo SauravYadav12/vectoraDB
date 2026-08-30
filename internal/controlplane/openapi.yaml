@@ -1,0 +1,304 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The canonical OpenAPI description of VectoraDB's HTTP APIs. It is embedded in
+# the control-plane binary and served at GET /api/openapi.yaml, so any generator
+# can produce a typed client. The hand-written SDKs under clients/ are thin
+# wrappers over these same endpoints.
+openapi: 3.1.0
+info:
+  title: VectoraDB API
+  version: "0.6"
+  description: >
+    Control-plane and Agent Branch APIs for VectoraDB — serverless PostgreSQL
+    with instant branching, time-travel, and a tamper-evident Schema Ledger.
+    All endpoints are served over TLS. Authenticate with an API key
+    (`vdb_…`) as a Bearer token.
+  license:
+    name: AGPL-3.0-or-later
+servers:
+  - url: https://localhost:8080
+    description: Control-plane API
+  - url: https://localhost:8088
+    description: Agent Branch API
+security:
+  - apiKey: []
+tags:
+  - name: status
+  - name: branches
+  - name: ledger
+  - name: pipelines
+  - name: import
+  - name: keys
+  - name: agents
+
+paths:
+  /api/status:
+    get:
+      tags: [status]
+      summary: Primary readiness, branch/agent counts, HA, storage, and per-server liveness.
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/branches:
+    get:
+      tags: [branches]
+      summary: List branches (state, size, connections).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Branch" } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [branches]
+      summary: Create an instant copy-on-write branch of main.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: qa }
+      responses:
+        "200": { description: Created }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/branches/{name}:
+    delete:
+      tags: [branches]
+      summary: Delete a branch.
+      parameters: [{ $ref: "#/components/parameters/BranchName" }]
+      responses:
+        "200": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/branches/{name}/suspend:
+    post:
+      tags: [branches]
+      summary: Suspend a branch (stop its compute; data preserved).
+      parameters: [{ $ref: "#/components/parameters/BranchName" }]
+      responses: { "200": { description: Suspended }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/branches/{name}/resume:
+    post:
+      tags: [branches]
+      summary: Resume a suspended branch.
+      parameters: [{ $ref: "#/components/parameters/BranchName" }]
+      responses: { "200": { description: Resumed }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/branches/{name}/query:
+    post:
+      tags: [branches]
+      summary: Run SQL against a branch (time-bounded, row-capped).
+      parameters: [{ $ref: "#/components/parameters/BranchName" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sql]
+              properties:
+                sql: { type: string, example: "SELECT 1" }
+      responses:
+        "200":
+          description: Columns and rows, or an error message.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QueryResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/branches/{name}/ledger:
+    get:
+      tags: [ledger]
+      summary: The branch's schema-ledger history (filterable).
+      parameters:
+        - { $ref: "#/components/parameters/BranchName" }
+        - { name: actor, in: query, schema: { type: string } }
+        - { name: table, in: query, schema: { type: string } }
+        - { name: risk, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: kind, in: query, schema: { type: string, enum: [human, agent] } }
+        - { name: limit, in: query, schema: { type: integer, default: 200, maximum: 2000 } }
+        - { name: offset, in: query, schema: { type: integer } }
+      responses:
+        "200":
+          description: Ledger rows.
+          content: { application/json: { schema: { $ref: "#/components/schemas/QueryResult" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/branches/{name}/ledger/verify:
+    get:
+      tags: [ledger]
+      summary: Recompute the ledger's hash chain and report whether it is intact.
+      parameters: [{ $ref: "#/components/parameters/BranchName" }]
+      responses:
+        "200":
+          description: "Columns: legacy, chained, broken, first_broken."
+          content: { application/json: { schema: { $ref: "#/components/schemas/QueryResult" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/import:
+    post:
+      tags: [import]
+      summary: Import from a database connection string or a file path into a fresh branch.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from: { type: string, description: "postgres://…, mysql://…, mongodb://…, or a file path" }
+                as: { type: string, description: "target branch name" }
+      responses: { "200": { description: "Import started (streams progress via SSE)" }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/import/file:
+    post:
+      tags: [import]
+      summary: Import an uploaded .sql/.csv/.json/.ndjson file into a fresh branch.
+      responses: { "200": { description: OK }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/pipelines:
+    get:
+      tags: [pipelines]
+      summary: List ETL pipelines.
+      responses: { "200": { description: OK }, "401": { $ref: "#/components/responses/Unauthorized" } }
+    post:
+      tags: [pipelines]
+      summary: Create an ETL pipeline.
+      responses: { "200": { description: Created }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/pipelines/{id}:
+    get:
+      tags: [pipelines]
+      summary: Get a pipeline.
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK }, "401": { $ref: "#/components/responses/Unauthorized" } }
+    put:
+      tags: [pipelines]
+      summary: Update a pipeline.
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: Updated }, "401": { $ref: "#/components/responses/Unauthorized" } }
+    delete:
+      tags: [pipelines]
+      summary: Delete a pipeline.
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: Deleted }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/pipelines/{id}/runs:
+    get:
+      tags: [pipelines]
+      summary: List a pipeline's runs.
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: OK }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/pipelines/{id}/run:
+    post:
+      tags: [pipelines]
+      summary: Run a pipeline (streams logs via SSE).
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: Started }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/keys:
+    get:
+      tags: [keys]
+      summary: List the caller's API keys.
+      responses: { "200": { description: OK }, "401": { $ref: "#/components/responses/Unauthorized" } }
+    post:
+      tags: [keys]
+      summary: Mint a new API key (the secret is returned once).
+      requestBody:
+        content: { application/json: { schema: { type: object, properties: { name: { type: string } } } } }
+      responses: { "200": { description: "Created; the plaintext key is shown once." }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /api/keys/{id}:
+    delete:
+      tags: [keys]
+      summary: Revoke an API key.
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: Revoked }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /agents:
+    get:
+      tags: [agents]
+      summary: List active agent branches. (Agent Branch API, :8088)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { agents: { type: array, items: { $ref: "#/components/schemas/AgentBranch" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /agents/{id}/branch:
+    post:
+      tags: [agents]
+      summary: Create an agent's branch and return its DSN. (Agent Branch API, :8088)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/AgentBranch" } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      tags: [agents]
+      summary: Delete an agent's branch. (Agent Branch API, :8088)
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses: { "200": { description: Deleted }, "401": { $ref: "#/components/responses/Unauthorized" } }
+
+  /healthz:
+    get:
+      tags: [status]
+      security: []
+      summary: Liveness (public). (Agent Branch API, :8088)
+      responses: { "200": { description: OK } }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: An API key (`vdb_…`) minted with `vdb apikey create`.
+  parameters:
+    BranchName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key.
+  schemas:
+    Branch:
+      type: object
+      properties:
+        name: { type: string }
+        state: { type: string }
+        primary: { type: boolean }
+        agent: { type: boolean }
+        used: { type: string }
+        connections: { type: integer }
+    AgentBranch:
+      type: object
+      properties:
+        agent: { type: string }
+        branch: { type: string }
+        host: { type: string }
+        port: { type: string }
+        dsn: { type: string }
+        status: { type: string }
+    QueryResult:
+      type: object
+      properties:
+        columns: { type: array, items: { type: string } }
+        rows: { type: array, items: { type: array } }
+        error: { type: string }

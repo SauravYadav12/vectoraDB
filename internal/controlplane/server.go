@@ -6,6 +6,7 @@ package controlplane
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -30,6 +31,12 @@ import (
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
 
+// openapiSpec is the canonical API description, served at GET /api/openapi.yaml
+// so any client generator can consume it.
+//
+//go:embed openapi.yaml
+var openapiSpec []byte
+
 // Serve starts the control-plane REST API on addr (e.g. ":8080").
 func Serve(addr string) error {
 	store, err := auth.OpenFromEnv()
@@ -39,6 +46,13 @@ func Serve(addr string) error {
 
 	mux := http.NewServeMux()
 	store.MountPublic(mux) // /auth/* (register, login, logout, me, providers, oauth)
+
+	// The API description, public so client generators can fetch it. More
+	// specific than the "/api/" auth gate below, so it wins and stays open.
+	mux.HandleFunc("GET /api/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml")
+		_, _ = w.Write(openapiSpec)
+	})
 
 	api := http.NewServeMux()
 	registerAPI(api)
