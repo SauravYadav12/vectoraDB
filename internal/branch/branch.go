@@ -681,10 +681,12 @@ func EnsureRunning(name string) (string, error) {
 		if err := waitReady(name); err != nil {
 			return "", err
 		}
+		reconcileGuard(name)
 	default: // exited, created, paused, ...
 		if err := Resume(name); err != nil {
 			return "", err
 		}
+		reconcileGuard(name)
 	}
 	return BackendAddr(name)
 }
