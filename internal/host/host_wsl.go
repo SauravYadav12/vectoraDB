@@ -143,6 +143,17 @@ func legacyZFSBundleName(kernelRelease string) string {
 	return "vectoradb-zfs-" + strings.TrimSpace(kernelRelease) + ".tar.gz"
 }
 
+// guestModulesDir is the durable home for the ZFS kernel modules inside the
+// distro, holding <rel>/*.ko.
+//
+// They cannot simply live in /usr/lib/modules/<rel>: that path is an overlay
+// whose upper layer belongs to the WSL VM rather than to this distro's disk. It
+// outlives `wsl --terminate` but not a VM shutdown, which WSL performs by itself
+// once the last distro is idle — so modules installed only there vanish between
+// sessions, taking the pool with them. vectoradb-zpool.service copies them back
+// into the overlay on every boot.
+const guestModulesDir = "/usr/local/lib/vectoradb/modules"
+
 // distroImageName is the prebuilt distro: Ubuntu with Docker, the ZFS userland,
 // the engine and the container images already in place. Importing it replaces
 // an apt install, a docker build and three registry pulls on the user's machine.

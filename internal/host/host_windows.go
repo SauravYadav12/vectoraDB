@@ -441,6 +441,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:$PATH
 IMG=/var/lib/vectoradb-zpool.img
 DEV=/dev/vectoradb-pool
 SIZE="${VECTORADB_ZPOOL_SIZE:-30G}"
+MODSRC=/usr/local/lib/vectoradb/modules
 
 # Mount the datasets and put them under shared propagation.
 #
@@ -460,7 +461,31 @@ finish() {
 	mount --make-rshared /vectoradb 2>/dev/null || true
 }
 
-modprobe zfs
+# Put the ZFS modules back before anything needs them.
+#
+# /usr/lib/modules/<rel> is an overlay whose upper layer lives in the WSL VM, not
+# on this distro's disk: it survives 'wsl --terminate' but not a VM shutdown, and
+# WSL shuts the VM down on its own once the last distro goes idle. So the modules
+# are kept under /usr/local (a real filesystem) and reinstated here at every boot.
+# Without this, ZFS quietly disappears between sessions and the pool -- the user's
+# data -- cannot be imported.
+ensure_modules() {
+	if modprobe zfs 2>/dev/null; then
+		return 0
+	fi
+	K="$(uname -r)"
+	if [ ! -d "$MODSRC/$K" ]; then
+		echo "vectoradb: no ZFS modules for kernel $K." >&2
+		echo "vectoradb: run 'vdb setup' to install them." >&2
+		exit 1
+	fi
+	mkdir -p "/usr/lib/modules/$K/extra"
+	cp -a "$MODSRC/$K/." "/usr/lib/modules/$K/extra/"
+	depmod -a "$K"
+	modprobe zfs
+}
+
+ensure_modules
 [ -f "$IMG" ] || truncate -s "$SIZE" "$IMG"
 
 # Bind the image to exactly one loop device, and expose it under a stable name.
@@ -747,12 +772,22 @@ func installZFS(name string) error {
 	// and /lib is a symlink to /usr/lib on a usrmerged Ubuntu. Without the flag
 	// tar replaces that symlink with a real directory and splits the distro's
 	// libraries in two.
+	// A persistent copy is kept alongside the overlay install, because the module
+	// tree is NOT durable: /usr/lib/modules/<rel> is an overlay whose upper layer
+	// lives in the WSL VM's own namespace, not on this distro's disk. It survives
+	// `wsl --terminate` but is destroyed when the VM shuts down — which WSL does
+	// on its own once the last distro goes idle. Without the copy, ZFS silently
+	// disappears between sessions and the pool cannot be imported.
+	// vectoradb-zpool.service reinstalls from modulesDir at every boot.
 	script := fmt.Sprintf("set -e; %s; tar -C / --keep-directory-symlink -xzf %q; "+
+		"mkdir -p %q/%q; cp -a /usr/lib/modules/%q/extra/. %q/%q/; "+
 		"depmod -a %q; ldconfig; modprobe zfs; "+
 		"systemctl daemon-reload; "+
 		"systemctl mask zfs-import-scan.service zfs-import-cache.service >/dev/null 2>&1 || true; "+
 		"systemctl enable --now zfs-mount.service zfs.target",
-		guestPath, winPathToMnt(bundle), rel)
+		guestPath, winPathToMnt(bundle),
+		guestModulesDir, rel, rel, guestModulesDir, rel,
+		rel)
 	if err := wslRoot(name, script); err != nil {
 		return fmt.Errorf("installing ZFS into the distro: %w", err)
 	}
