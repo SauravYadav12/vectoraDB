@@ -263,20 +263,21 @@ SELECT (SELECT count(*) FROM vdb.schema_ledger WHERE row_hash IS NULL) AS legacy
        coalesce(min(id) FILTER (WHERE row_hash <> recomputed OR prev_hash IS DISTINCT FROM coalesce(prev_link,''))::text,'') AS first_broken
 FROM v`
 
-// LedgerVerify recomputes the ledger's hash chain and reports whether it is
-// intact. A broken chain means a row was deleted or edited after the fact.
-func LedgerVerify(name string) error {
+// LedgerVerify recomputes the ledger's hash chain and returns a human-readable
+// summary. A non-nil error means the chain is broken (a row was deleted or
+// edited after the fact) — the message says where.
+func LedgerVerify(name string) (string, error) {
 	if name == "" {
 		name = "main"
 	}
 	out, err := capture("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container(name),
 		"psql", "-U", pgUser, "-d", pgDatabase, "-tA", "-F", "|", "-c", LedgerVerifySQL)
 	if err != nil {
-		return fmt.Errorf("verify query: %w", err)
+		return "", fmt.Errorf("verify query: %w", err)
 	}
 	f := strings.Split(strings.TrimSpace(out), "|")
 	if len(f) < 3 {
-		return fmt.Errorf("unexpected verify output: %q", out)
+		return "", fmt.Errorf("unexpected verify output: %q", out)
 	}
 	legacy, chained, broken := f[0], f[1], f[2]
 	firstBroken := ""
@@ -284,15 +285,49 @@ func LedgerVerify(name string) error {
 		firstBroken = f[3]
 	}
 	if broken != "0" {
-		return fmt.Errorf("ledger TAMPERED — %s of %s chained rows fail verification (first at id %s)",
+		return "", fmt.Errorf("ledger TAMPERED — %s of %s chained rows fail verification (first at id %s)",
 			broken, chained, firstBroken)
 	}
 	msg := fmt.Sprintf("ledger intact — %s rows hash-chained and verified", chained)
 	if legacy != "0" && legacy != "" {
 		msg += fmt.Sprintf("; %s earlier row(s) predate tamper-evidence and are unchained", legacy)
 	}
-	fmt.Println(msg)
-	return nil
+	return msg, nil
+}
+
+// captureCombined runs a privileged command and returns its combined
+// stdout+stderr, so a failing psql includes the server's error text.
+func captureCombined(name string, args ...string) (string, error) {
+	out, err := exec.Command("sudo", append([]string{name}, args...)...).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// QueryText runs SQL on a branch and returns psql's rendered output (used by the
+// MCP run_sql tool and other capture callers). On failure the returned string is
+// psql's error message.
+func QueryText(name, sql string) (string, error) {
+	if name == "" {
+		name = "main"
+	}
+	out, err := captureCombined("docker", "exec", "-e", "PGPASSWORD="+pgPass(), container(name),
+		"psql", "-U", pgUser, "-d", pgDatabase, "-P", "pager=off", "-c", sql)
+	if err != nil {
+		return out, fmt.Errorf("%s", out)
+	}
+	return out, nil
+}
+
+// LedgerText returns a branch's recent schema-ledger entries as rendered text —
+// the "show me what I changed" view for an agent.
+func LedgerText(name string, limit int) (string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := fmt.Sprintf(`SELECT to_char(at,'MM-DD HH24:MI:SS') AS time,
+		coalesce(actor,'-') AS actor, actor_kind AS kind, command_tag AS command,
+		coalesce(object_identity,'') AS object, status, coalesce(risk,'') AS risk
+		FROM vdb.schema_ledger ORDER BY at DESC LIMIT %d`, limit)
+	return QueryText(name, q)
 }
 
 // Create makes an instant copy-on-write branch of parent (default "main") and

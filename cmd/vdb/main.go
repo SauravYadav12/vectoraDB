@@ -24,6 +24,7 @@ import (
 	"github.com/vectoradb/vectoradb/internal/controlplane"
 	"github.com/vectoradb/vectoradb/internal/daemon"
 	"github.com/vectoradb/vectoradb/internal/host"
+	"github.com/vectoradb/vectoradb/internal/mcp"
 	"github.com/vectoradb/vectoradb/internal/proxy"
 	"github.com/vectoradb/vectoradb/internal/version"
 	"github.com/vectoradb/vectoradb/web"
@@ -62,11 +63,13 @@ Branching:
   branch create <name>  Instant copy-on-write branch of main (ZFS clone)
   branch list           List branches and their containers
   branch delete <name>  Stop and destroy a branch
+  branch reset <name>   Re-clone from parent, discarding everything done on it
   branch suspend <name> Stop a branch (data preserved); resumes on next connect
   branch resume <name>  Start a suspended branch
 
 Schema ledger (RECORD layer):
   ledger [branch] [--limit N]  Show captured DDL changes — attributed & policy-checked
+  ledger verify [branch]       Verify the tamper-evident hash chain is intact
   ledger revert --to <ts>      Time-travel revert of a branch's schema+data to a moment
 
 Migration:
@@ -95,6 +98,8 @@ Serverless front door:
 
 Agent Branch API:
   serve [--addr :8088] Run the HTTP API: one database branch per AI agent
+  mcp                  Run the MCP server on stdio: an agent framework gets a database,
+                       runs SQL, sees what it changed (the ledger), and throws it away
 
 Auth (admin):
   user create <email>            Create an account (prompts for a password)
@@ -231,6 +236,9 @@ func main() {
 	case "gateway":
 		// The internal package is still named "proxy"; the user-facing command is "gateway".
 		must(proxy.Serve(addrFlag(os.Args[2:], ":6432"), durFlag(os.Args[2:], "--idle", 2*time.Minute)))
+	case "mcp":
+		// MCP server on stdio: an agent framework drives branches + the ledger.
+		must(mcp.Serve())
 	default:
 		fmt.Printf("unknown command: %s\n\n", os.Args[1])
 		fmt.Print(usage)
@@ -353,7 +361,9 @@ func ledgerCmd(args []string) {
 		if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
 			name = args[1]
 		}
-		must(branch.LedgerVerify(name))
+		msg, err := branch.LedgerVerify(name)
+		must(err)
+		fmt.Println(msg)
 		return
 	}
 	name, limit := "main", 50
