@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Publishes the install scripts to GitHub Pages, so the install command is short
+# and stable:
+#
+#   irm https://sauravyadav12.github.io/vectoraDB/install | iex
+#
+# The published files are copied from deploy/ at build time rather than
+# maintained separately: a second copy that drifts from the real installer is
+# worse than a long URL.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/install.ps1'
+      - 'deploy/install.sh'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble the site
+        run: |
+          set -eux
+          mkdir -p site
+          # Served verbatim. `install` (no extension) keeps the command short;
+          # install.ps1 stays as an alias for anyone who types it.
+          cp deploy/install.ps1 site/install
+          cp deploy/install.ps1 site/install.ps1
+          cp deploy/install.sh  site/install.sh
+
+          # A BOM here would be piped into `iex` and reported as
+          # "The term '# ' is not recognized" on line 1.
+          for f in site/install site/install.ps1 site/install.sh; do
+            if head -c 3 "$f" | od -An -tu1 | grep -q '239 187 191'; then
+              echo "error: $f has a UTF-8 BOM" >&2
+              exit 1
+            fi
+          done
+
+          # Non-ASCII is equally fatal, the other way round: without a BOM,
+          # Windows PowerShell 5.1 reads the file as ANSI and mangles it into a
+          # parse error. Pure ASCII is what makes both `irm | iex` and
+          # `.\install.ps1` work.
+          if LC_ALL=C grep -n '[^ -~]' site/install; then
+            echo "error: site/install contains non-ASCII characters" >&2
+            exit 1
+          fi
+
+          # A minimal landing page so the Pages root is not a 404.
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>VectoraDB install</title>
+          <h1>VectoraDB</h1>
+          <p>Windows (PowerShell):</p>
+          <pre>irm https://sauravyadav12.github.io/vectoraDB/install | iex</pre>
+          <p>macOS / Linux:</p>
+          <pre>curl -fsSL https://sauravyadav12.github.io/vectoraDB/install.sh | sh</pre>
+          <p><a href="https://github.com/SauravYadav12/vectoraDB">Source</a></p>
+          HTML
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

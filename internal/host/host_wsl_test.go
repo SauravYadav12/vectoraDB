@@ -103,6 +103,25 @@ func TestZFSBundleName(t *testing.T) {
 	}
 }
 
+// TC1.8 — setup fetches assets from the release matching this binary, so a
+// pinned build never silently pulls a newer release's kernel modules. Only an
+// unstamped dev build, which has no release of its own, falls back to latest.
+func TestReleaseAssetURL(t *testing.T) {
+	const repo, asset = "o/r", "a.tar.gz"
+	cases := []struct{ version, want string }{
+		{"0.4.0", "https://github.com/o/r/releases/download/v0.4.0/a.tar.gz"},
+		{"v0.4.0", "https://github.com/o/r/releases/download/v0.4.0/a.tar.gz"},
+		{" 0.4.0 ", "https://github.com/o/r/releases/download/v0.4.0/a.tar.gz"},
+		{"0.1.0-dev", "https://github.com/o/r/releases/latest/download/a.tar.gz"},
+		{"", "https://github.com/o/r/releases/latest/download/a.tar.gz"},
+	}
+	for _, c := range cases {
+		if got := releaseAssetURL(repo, c.version, asset); got != c.want {
+			t.Errorf("releaseAssetURL(%q) = %q, want %q", c.version, got, c.want)
+		}
+	}
+}
+
 // TC1.4 — importLocalFile rewrites a local file to a stdin stream; pass-through
 // for postgres:// and non-files. (Shared launcher logic, OS-independent.)
 func TestImportLocalFile(t *testing.T) {

@@ -46,29 +46,42 @@ Describe 'Add-ToPath' {
 # installer running against a bumped WSL kernel misses the download rather than
 # staging modules that cannot load. Must agree with zfsBundleName in
 # internal/host/host_wsl.go.
-Describe 'Get-ZfsBundleName' {
+# TC4.6 -- the installer must not depend on WSL. Choosing the ZFS bundle moved
+# into `vdb setup`, which is the first point the right kernel is knowable; an
+# installer that needed WSL first is what forced the old manual multi-step setup.
+Describe 'installer is independent of WSL' {
     BeforeAll { . "$PSScriptRoot/install.ps1" }
-    It 'embeds the kernel release in the filename' {
-        Get-ZfsBundleName '6.6.87.2-microsoft-standard-WSL2' |
-            Should -Be 'vectoradb-zfs-6.6.87.2-microsoft-standard-WSL2.tar.gz'
+    It 'no longer defines WSL-kernel-dependent helpers' {
+        Get-Command Get-WslKernelRelease -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+        Get-Command Get-ZfsBundleName    -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
-    It 'trims surrounding whitespace from the release' {
-        Get-ZfsBundleName "  6.6.87.2-microsoft-standard-WSL2`n" |
-            Should -Be 'vectoradb-zfs-6.6.87.2-microsoft-standard-WSL2.tar.gz'
+    It 'never mentions a distribution when installing WSL' {
+        $src = Get-Content "$PSScriptRoot/install.ps1" -Raw
+        $src | Should -Match '--no-distribution'
+        $src | Should -Not -Match 'wsl --install -d '
     }
 }
 
-# TC4.7 — kernel detection must degrade to $null rather than throw when WSL is
-# absent (the CI runner has no WSL), so the installer can warn and continue.
-Describe 'Get-WslKernelRelease' {
-    BeforeAll { . "$PSScriptRoot/install.ps1" }
-    It 'returns null or a non-empty release string, never throws' {
-        $rel = Get-WslKernelRelease
-        if ($null -ne $rel) { $rel | Should -Not -BeNullOrEmpty }
+# TC4.7 -- encoding. These two invocations pull in opposite directions: a BOM
+# breaks `irm | iex` ("The term '# ' is not recognized"), and no BOM makes
+# Windows PowerShell 5.1 read non-ASCII as ANSI and fail to parse the file.
+# Pure ASCII with no BOM is the only encoding that satisfies both.
+Describe 'install.ps1 encoding' {
+    It 'has no UTF-8 BOM' {
+        $b = [System.IO.File]::ReadAllBytes("$PSScriptRoot/install.ps1")
+        ($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) | Should -BeFalse
+    }
+    It 'is pure ASCII' {
+        $bad = [System.IO.File]::ReadAllBytes("$PSScriptRoot/install.ps1") | Where-Object { $_ -gt 127 }
+        $bad | Should -BeNullOrEmpty
+    }
+    It 'parses the way iex would receive it' {
+        $text = [System.IO.File]::ReadAllText("$PSScriptRoot/install.ps1")
+        { [scriptblock]::Create($text) } | Should -Not -Throw
     }
 }
 
-# TC4.8 — Windows ships tar.exe (10 1803+/11); the installer uses it to expand
+# TC4.8 -- Windows ships tar.exe (10 1803+/11); the installer uses it to expand
 # the image build context, so a missing tar is a hard install failure.
 Describe 'tar.exe availability' {
     It 'is present on PATH' {

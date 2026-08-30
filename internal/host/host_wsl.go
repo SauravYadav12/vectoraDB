@@ -130,3 +130,22 @@ func parseKernelRelease(raw []byte) string {
 func zfsBundleName(kernelRelease string) string {
 	return "vectoradb-zfs-" + strings.TrimSpace(kernelRelease) + ".tar.gz"
 }
+
+// releaseAssetURL is where `vdb setup` fetches an asset the installer did not
+// stage. The ZFS bundle is fetched here rather than by install.ps1 because only
+// setup knows which one is needed: it has just created the distro, so it can ask
+// the running kernel, whereas the installer would need WSL to already exist.
+//
+// The version is the one stamped into this binary, so a v0.4.0 vdb.exe takes
+// v0.4.0 assets and never silently drifts onto a newer release's. An unstamped
+// dev build has no matching release, so it falls back to latest.
+func releaseAssetURL(repo, version, asset string) string {
+	v := strings.TrimSpace(version)
+	if v == "" || strings.Contains(v, "dev") {
+		return "https://github.com/" + repo + "/releases/latest/download/" + asset
+	}
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	return "https://github.com/" + repo + "/releases/download/" + v + "/" + asset
+}
