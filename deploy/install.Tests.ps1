@@ -51,9 +51,15 @@ Describe 'Add-ToPath' {
 # installer that needed WSL first is what forced the old manual multi-step setup.
 Describe 'installer is independent of WSL' {
     BeforeAll { . "$PSScriptRoot/install.ps1" }
-    It 'no longer defines WSL-kernel-dependent helpers' {
-        Get-Command Get-WslKernelRelease -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
-        Get-Command Get-ZfsBundleName    -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    It 'no longer chooses the ZFS bundle itself' {
+        # Choosing it needs the WSL kernel, which the installer cannot know
+        # before WSL exists; setup does it. Kernel detection survives only as a
+        # best-effort pre-stage for older releases.
+        Get-Command Get-ZfsBundleName -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    }
+
+    It 'degrades gracefully when WSL is absent' {
+        { Get-WslKernelRelease } | Should -Not -Throw
     }
     It 'never mentions a distribution when installing WSL' {
         $src = Get-Content "$PSScriptRoot/install.ps1" -Raw
