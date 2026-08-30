@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vectoradb/vectoradb/internal/ledger"
@@ -209,6 +210,40 @@ func Init() error {
 // ledger install (roles are cluster-global and travel with a branch's clone).
 func syncAppRole(name string) error {
 	return psqlStdin(name, fmt.Sprintf("ALTER ROLE vdbclient WITH LOGIN PASSWORD %s;", quoteLiteral(pgPass())))
+}
+
+// ensuredRoles caches which (branch, email) per-user roles this process has
+// already provisioned, so the create runs at most once each.
+var ensuredRoles sync.Map
+
+// EnsureUserRole makes sure a per-user login role named for email exists on the
+// branch's Postgres, so the gateway can log a client in AS that role — and the
+// ledger can read session_user as the actor, an identity the client cannot forge
+// (SET ROLE does not change session_user). The role is a member of vdbclient
+// (inherits its data access) and defaults its current role to vdbclient, so
+// object ownership and RLS stay shared exactly as before.
+func EnsureUserRole(branchName, email string) error {
+	if branchName == "" {
+		branchName = "main"
+	}
+	k := branchName + "\x00" + email
+	if _, ok := ensuredRoles.Load(k); ok {
+		return nil
+	}
+	sql := fmt.Sprintf(`DO $do$
+DECLARE r text := %s;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+    EXECUTE format('CREATE ROLE %%I LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB INHERIT IN ROLE vdbclient', r);
+  END IF;
+  EXECUTE format('ALTER ROLE %%I WITH LOGIN PASSWORD %%L', r, %s);
+  EXECUTE format('ALTER ROLE %%I SET role = vdbclient', r);
+END $do$;`, quoteLiteral(email), quoteLiteral(pgPass()))
+	if err := psqlStdin(branchName, sql); err != nil {
+		return err
+	}
+	ensuredRoles.Store(k, struct{}{})
+	return nil
 }
 
 // syncRolePassword sets the Postgres role password to the per-install secret.

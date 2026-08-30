@@ -62,8 +62,9 @@ page in the web console too.
 
 > **Tamper-evident:** every row is hash-chained and the table is append-only, so
 > `vdb ledger verify` catches any deleted or edited entry. Clients connect through
-> the gateway as a non-superuser role, so they cannot rewrite history or bypass
-> the guardrail — and Postgres **RLS and GRANTs apply** to them as usual.
+> the gateway as a per-user, non-superuser role, so they cannot rewrite history or
+> bypass the guardrail, Postgres **RLS and GRANTs apply** to them, and the recorded
+> **actor is the login identity** — a client cannot forge who made a change.
 
 ## Status
 

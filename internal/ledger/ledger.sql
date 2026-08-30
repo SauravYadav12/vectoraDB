@@ -48,11 +48,17 @@ INSERT INTO vdb.policy(op, action) VALUES
   ('DROP SCHEMA', 'block')
 ON CONFLICT (op) DO NOTHING;
 
--- Attribution context, read from connection settings the Gateway injects.
+-- Attribution context. The actor is the login identity (session_user) when the
+-- client logged in as a per-user role — a value a client CANNOT change (SET ROLE
+-- leaves session_user untouched), so gateway attribution is non-forgeable. The
+-- shared/admin roles fall back to the gateway-injected actor. The rest is read
+-- from connection settings the Gateway injects.
 CREATE OR REPLACE FUNCTION vdb._ctx(
   OUT actor text, OUT actor_kind text, OUT tool text, OUT session text, OUT branch text
 ) LANGUAGE sql STABLE AS $$
-  SELECT current_setting('vdb.actor', true),
+  SELECT CASE WHEN session_user NOT IN ('vectoradb','vdbclient')
+              THEN session_user
+              ELSE current_setting('vdb.actor', true) END,
          coalesce(nullif(current_setting('vdb.actor_kind', true), ''), 'human'),
          nullif(current_setting('application_name', true), ''),
          coalesce(nullif(current_setting('vdb.session', true), ''), pg_backend_pid()::text),
