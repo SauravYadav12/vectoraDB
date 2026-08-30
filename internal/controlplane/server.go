@@ -23,6 +23,7 @@ import (
 	"github.com/vectoradb/vectoradb/internal/auth"
 	"github.com/vectoradb/vectoradb/internal/branch"
 	"github.com/vectoradb/vectoradb/internal/daemon"
+	"github.com/vectoradb/vectoradb/internal/secrets"
 	"github.com/vectoradb/vectoradb/internal/tlsutil"
 	"github.com/vectoradb/vectoradb/web"
 )
@@ -174,7 +175,8 @@ func registerAPI(mux *http.ServeMux) {
 			writeErr(w, 404, err)
 			return
 		}
-		writeJSON(w, 200, runQuery(addr, body.SQL))
+		u, _ := auth.UserFrom(r.Context())
+		writeJSON(w, 200, runQuery(addr, body.SQL, u.Email))
 	})
 
 	// Migration: import a source database into a new instance from a connection
@@ -246,7 +248,7 @@ func registerAPI(mux *http.ServeMux) {
 			writeErr(w, 404, err)
 			return
 		}
-		writeJSON(w, 200, runQuery(addr, ledgerSQL(r.URL.Query())))
+		writeJSON(w, 200, runQuery(addr, ledgerSQL(r.URL.Query()), ""))
 	})
 }
 
@@ -293,15 +295,26 @@ func ledgerSQL(q url.Values) string {
 
 // runQuery executes SQL against a branch backend and returns columns/rows (or an
 // error message the console can render). Capped and time-bounded.
-func runQuery(addr, sql string) map[string]any {
+func runQuery(addr, sql, actor string) map[string]any {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	conn, err := pgx.Connect(ctx, fmt.Sprintf("postgres://vectoradb:vectoradb@%s/vectoradb", addr))
+	conn, err := pgx.Connect(ctx,
+		fmt.Sprintf("postgres://vectoradb:%s@%s/vectoradb", secrets.Load().PGPassword, addr))
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
 	defer conn.Close(ctx)
+
+	// Attribute console DDL in the schema ledger to the signed-in user — our own
+	// tool should not be the blind spot. Reads pass actor="" and skip this.
+	if actor != "" {
+		if _, err := conn.Exec(ctx,
+			"SELECT set_config('vdb.actor',$1,false), set_config('vdb.actor_kind','human',false), set_config('application_name','console',false)",
+			actor); err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+	}
 
 	rows, err := conn.Query(ctx, sql)
 	if err != nil {

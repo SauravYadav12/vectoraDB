@@ -32,7 +32,14 @@ var authStore *auth.Store
 // API key never crosses the wire in cleartext. Loaded once in Serve.
 var tlsConfig *tls.Config
 
+// gatewayNoAuth reports whether the gateway's API-key check is disabled. The
+// VECTORADB_GATEWAY_NOAUTH escape hatch is only honored in builds made with
+// `-tags insecure`; release builds compile it out (insecureAllowed == false), so
+// a full auth bypass can never be flipped on in production by an env var.
 func gatewayNoAuth() bool {
+	if !insecureAllowed {
+		return false
+	}
 	v := os.Getenv("VECTORADB_GATEWAY_NOAUTH")
 	return v == "1" || v == "true"
 }

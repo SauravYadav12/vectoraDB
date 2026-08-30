@@ -70,6 +70,9 @@ type storage interface {
 	// destroyStandby removes the standby storage. Best effort: tearing down HA
 	// must not fail because there was nothing to tear down.
 	destroyStandby()
+	// protectPrimary applies any driver-specific guard that keeps the primary
+	// writable when branches grow (a ZFS reservation). Idempotent, best-effort.
+	protectPrimary()
 }
 
 // activeStorage returns the configured driver.
@@ -79,6 +82,46 @@ func activeStorage() storage {
 		return btrfsStorage{}
 	default:
 		return zfsStorage{}
+	}
+}
+
+// --- per-branch space limits (ZFS) ---
+//
+// Branches and the primary share one pool. Without a limit, a runaway branch —
+// exactly what the Agent Branch API invites — can fill the pool and take main
+// read-only. Two guards: a reservation guarantees main some writable space no
+// matter what branches do, and an optional per-branch refquota caps how much any
+// one branch can grow.
+
+const (
+	envBranchRefquota  = "VECTORADB_BRANCH_REFQUOTA"  // cap a branch's referenced space (e.g. "20G"); unset = uncapped
+	envMainReservation = "VECTORADB_MAIN_RESERVATION" // guarantee main this much writable space
+	defaultMainReserve = "2G"
+)
+
+// setBranchRefquota caps how much a branch dataset may reference. Opt-in: unset
+// or "none" leaves branches uncapped, because a clone references its parent's
+// blocks, so a cap smaller than the parent would refuse creation — the operator
+// sizes it to their data.
+func setBranchRefquota(ds string) error {
+	q := envOr(envBranchRefquota, "")
+	if q == "" || strings.EqualFold(q, "none") {
+		return nil
+	}
+	return run("zfs", "set", "refquota="+q, ds)
+}
+
+// reserveMain reserves pool space for the primary so branches filling the rest
+// of the pool cannot take main read-only. Best-effort — a reservation that can't
+// be set (e.g. the pool is already full) is a warning, not a startup failure.
+// "none" disables it.
+func reserveMain() {
+	r := envOr(envMainReservation, defaultMainReserve)
+	if r == "" || strings.EqualFold(r, "none") {
+		return
+	}
+	if err := run("zfs", "set", "reservation="+r, dataset("main")); err != nil {
+		fmt.Printf("note: could not reserve %s for main (%v); branches could still crowd it out\n", r, err)
 	}
 }
 
@@ -127,8 +170,16 @@ func (zfsStorage) exists(branch string) bool {
 }
 
 func (zfsStorage) createEmpty(branch string) error {
-	return run("zfs", "create", "-p", dataset(branch))
+	if err := run("zfs", "create", "-p", dataset(branch)); err != nil {
+		return err
+	}
+	if branch == "main" || branch == "standby" {
+		return nil // the primary and the HA standby are not capped
+	}
+	return setBranchRefquota(dataset(branch))
 }
+
+func (zfsStorage) protectPrimary() { reserveMain() }
 
 func (zfsStorage) clone(src, dst string) error {
 	snap := snapFor(src, dst)
@@ -138,7 +189,8 @@ func (zfsStorage) clone(src, dst string) error {
 	if err := run("zfs", "clone", snap, dataset(dst)); err != nil {
 		return fmt.Errorf("cloning into %s: %w", dst, err)
 	}
-	return nil
+	// A clone shares the parent's blocks, so cap only after it exists.
+	return setBranchRefquota(dataset(dst))
 }
 
 func (zfsStorage) destroy(branch string) error {
@@ -344,6 +396,10 @@ func (b btrfsStorage) destroyStandby() {
 		quiet("btrfs", "subvolume", "delete", btrfsSubvol("standby"))
 	}
 }
+
+// protectPrimary is a no-op on btrfs: it has no reservation, and per-branch
+// quota groups are off by default for performance (see usage()).
+func (btrfsStorage) protectPrimary() {}
 
 func (b btrfsStorage) capacity() (string, string, error) {
 	// FSSize/FSUsed from `btrfs filesystem usage --raw`, rendered like ZFS.

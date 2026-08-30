@@ -672,6 +672,12 @@ func mongoImportCollection(p *Progress, target, uri, coll string) error {
 	return cmd.Wait()
 }
 
+// reconcileGuard re-enables the destructive-DDL guardrail, which an import
+// temporarily disables (setGuard). A crash mid-import would otherwise leave a
+// branch permanently unguarded, so re-enable it whenever the branch (re)starts.
+// Idempotent — enabling an already-enabled trigger is a no-op.
+func reconcileGuard(name string) { setGuard(name, true) }
+
 // setGuard enables/disables the ledger's destructive-DDL guardrail on an instance.
 func setGuard(target string, enabled bool) {
 	verb := "DISABLE"

@@ -258,7 +258,14 @@ func ledgerOptions(existing, actor, branch string) string {
 		}
 	}
 	add("vdb.actor", actor)
-	add("vdb.actor_kind", "human")
+	// Attribute by the branch it routes to: an agent branch is an agent's, so its
+	// DDL is recorded as agent activity rather than hardcoded "human". (Agent
+	// branches are created by the Agent Branch API and named "agent-<id>".)
+	kind := "human"
+	if strings.HasPrefix(branch, "agent-") {
+		kind = "agent"
+	}
+	add("vdb.actor_kind", kind)
 	add("vdb.branch", branch)
 	add("vdb.session", sid)
 	return strings.Join(parts, " ")
