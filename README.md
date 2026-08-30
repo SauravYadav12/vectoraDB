@@ -20,7 +20,9 @@ postgres.ai / Database Lab model, implemented in Go.
 - **One serverless endpoint** — connect to `:6432`; the database name *is* the
   branch. Idle branches scale to zero and wake on connect.
 - **A database per AI agent** — the Agent Branch API hands each agent its own
-  instant, disposable branch over HTTP.
+  instant, disposable branch over HTTP, or over the **Model Context Protocol**
+  (`vdb mcp`): an agent gets a database, runs SQL, sees what it changed (from the
+  ledger), and throws it away — through one standard interface.
 - **Migrate from anything** — import from PostgreSQL, MySQL/MariaDB, MongoDB, and
   `.sql`/`.csv`/`.json`/`.ndjson` files, each landing in a fresh branch.
 - **ETL pipelines** *(experimental)* — dbt-style SQL models with data-quality
