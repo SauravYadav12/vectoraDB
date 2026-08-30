@@ -14,3 +14,7 @@ Makefile        text eol=lf
 *.go            text eol=lf
 go.mod          text eol=lf
 go.sum          text eol=lf
+
+# Workflow `run:` blocks execute on Linux runners; CRLF there breaks the shell.
+*.yml text eol=lf
+*.yaml text eol=lf
