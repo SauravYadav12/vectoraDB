@@ -65,6 +65,22 @@ function Test-Admin {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# Get-WslKernelRelease reports the kernel WSL runs (`uname -r`), or $null when
+# WSL is absent or has no distribution to run it in. wsl.exe emits UTF-16LE.
+#
+# The installer does not need this -- setup chooses the ZFS bundle -- but it is
+# used to opportunistically pre-stage that bundle for older releases.
+function Get-WslKernelRelease {
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return $null }
+    try {
+        $raw = & wsl.exe -e uname -r 2>$null
+        $rel = ($raw -join '').Trim() -replace "`0", ''
+        # A machine with WSL but no distro returns an error string, not a kernel.
+        if ($rel -match '^[0-9]+\.[0-9]+') { return $rel }
+    } catch { }
+    return $null
+}
+
 # Test-WslReady reports whether WSL is installed and healthy enough to import a
 # distro. `wsl --status` fails when the platform is present but not enabled.
 function Test-WslReady {
@@ -90,7 +106,15 @@ function Test-RebootPending {
 # machine that needed WSL enabled finishes on its own. It is a convenience, never
 # the only path: re-running the one-liner by hand always works.
 function Register-Resume {
-    $cmd = "irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex"
+    # RunOnce fires early at logon, typically before networking is up, so the
+    # resumed command waits for the download host to answer before starting.
+    # Without the wait it fails immediately on `irm` and the user sees only a
+    # stray error window -- which is what happened on the first real machine
+    # this was tried on.
+    $url = 'https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1'
+    $cmd = "for (`$i=0; `$i -lt 60; `$i++) { " +
+           "if (Test-Connection -ComputerName raw.githubusercontent.com -Count 1 -Quiet) { break }; " +
+           "Start-Sleep -Seconds 5 }; irm $url | iex"
     $run = "powershell -NoExit -NoProfile -ExecutionPolicy Bypass -Command `"$cmd`""
     try {
         New-ItemProperty -Force -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce' `
@@ -223,10 +247,13 @@ function Invoke-Install {
             Write-Host ""
             Write-Host "Windows needs to restart to finish enabling WSL." -ForegroundColor Yellow
             if ($resumed) {
-                Write-Host "VectoraDB will continue installing automatically after you restart."
-            } else {
-                Write-Host "After restarting, run this same command again to finish."
+                Write-Host "VectoraDB should continue by itself a moment after you sign back in."
             }
+            # Always given, even when the resume was registered: it depends on
+            # RunOnce firing and on networking being up, neither guaranteed.
+            Write-Host "If it does not, just run the same command again:" -ForegroundColor Yellow
+            Write-Host "    irm https://raw.githubusercontent.com/SauravYadav12/vectoraDB/main/deploy/install.ps1 | iex"
+            Write-Host "Nothing is lost by re-running it -- the install picks up where it stopped."
             Write-Host ""
             return
         }
@@ -251,9 +278,15 @@ function Invoke-Install {
 
     # 3. The Ubuntu rootfs. ~340 MB, so don't re-fetch a verified copy.
     #
-    # The ZFS bundle is deliberately NOT fetched here. It is specific to the WSL
-    # kernel, and only `vdb setup` can know which one is needed -- it has just
-    # created the distro, whereas this script may be running before WSL exists.
+    # Choosing the ZFS bundle is `vdb setup`'s job: it is specific to the WSL
+    # kernel, and only setup can know which one is needed, having just created
+    # the distro -- whereas this script may run before WSL exists at all.
+    #
+    # It is still staged opportunistically below when WSL happens to be up, purely
+    # so a new installer paired with an older release cannot produce a broken
+    # install: a vdb.exe from before setup could fetch its own bundle would
+    # otherwise find nothing and stop. Harmless when setup would fetch it anyway,
+    # since a staged bundle is simply used as-is.
     $rootfs = "$Prefix\vectoradb-rootfs.tar.gz"
     $verify = -not $env:VDB_ROOTFS_URL
     if ((Test-Path $rootfs) -and $verify -and (Test-UpstreamChecksum $rootfs "$RootfsBase/SHA256SUMS" $RootfsName)) {
@@ -262,6 +295,17 @@ function Invoke-Install {
         Write-Step "Downloading the Ubuntu rootfs (~340 MB, one time)"
         Get-File $RootfsUrl $rootfs | Out-Null
         if ($verify) { Assert-UpstreamChecksum $rootfs "$RootfsBase/SHA256SUMS" $RootfsName }
+    }
+
+    # Compatibility staging, per the note above. Best effort throughout: any
+    # failure here is silent, because setup fetches the bundle itself.
+    $rel = Get-WslKernelRelease
+    if ($rel) {
+        foreach ($name in @("vectoradb-zfs-modules-$rel.tar.gz", "vectoradb-zfs-$rel.tar.gz")) {
+            if (Test-Path "$Prefix\$name") { break }
+            if (Get-File (Get-VdbAsset $name) "$Prefix\$name" $false) { break }
+            Remove-Item "$Prefix\$name" -Force -ErrorAction SilentlyContinue
+        }
     }
 
     # 4. PATH -- persisted for new shells, and live in this one so `vdb` works
