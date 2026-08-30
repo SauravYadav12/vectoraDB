@@ -395,7 +395,7 @@ func durFlag(args []string, name string, def time.Duration) time.Duration {
 // branchCmd dispatches `vdb branch <subcommand>`.
 func branchCmd(args []string) {
 	if len(args) == 0 {
-		fmt.Println("usage: vdb branch <create|list|delete> [name]")
+		fmt.Println("usage: vdb branch <create|list|delete|reset|suspend|resume> [name]")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -413,6 +413,19 @@ func branchCmd(args []string) {
 			os.Exit(2)
 		}
 		must(branch.Delete(args[1]))
+	case "reset":
+		if len(args) < 2 {
+			fmt.Println("usage: vdb branch reset <name> [--from <parent>]")
+			os.Exit(2)
+		}
+		parent := "main"
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--from" && i+1 < len(args) {
+				parent = args[i+1]
+				i++
+			}
+		}
+		must(branch.Reset(args[1], parent))
 	case "suspend":
 		if len(args) < 2 {
 			fmt.Println("usage: vdb branch suspend <name>")

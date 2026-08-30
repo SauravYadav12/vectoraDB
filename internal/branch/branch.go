@@ -334,6 +334,23 @@ func Delete(name string) error {
 	return activeStorage().destroy(name)
 }
 
+// Reset re-creates a branch as a fresh copy-on-write clone of parent (default
+// "main"), discarding everything done on it. The most-wanted operation in an
+// agent workflow — start over cheaply — and near-instant on the existing
+// primitives.
+func Reset(name, parent string) error {
+	if name == "main" {
+		return fmt.Errorf("refusing to reset the primary branch 'main'")
+	}
+	if parent == "" {
+		parent = "main"
+	}
+	if err := Delete(name); err != nil {
+		return err
+	}
+	return Create(name, parent)
+}
+
 // List shows the branches and their containers.
 func List() error {
 	store := activeStorage()
