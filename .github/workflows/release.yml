@@ -71,3 +71,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: gh release upload "$TAG" dist/vdb-* dist/vectoradb-docker-context.tar.gz dist/SHA256SUMS --clobber
+
+  # Publish the Postgres+wal-g image so `vdb setup` pulls it (~30-60s) instead of
+  # building it locally on every install (~2-5min, and dependent on the wal-g
+  # release being reachable). ensureImage() falls back to building if the pull
+  # fails, so this is an optimization, not a hard dependency.
+  #
+  # NOTE: the first push creates the ghcr.io/vectoradb/postgres-walg package as
+  # PRIVATE. Make it public once (org → Packages → package → visibility) so
+  # `docker pull` works without auth.
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/postgres
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/vectoradb/postgres-walg:16
+            ghcr.io/vectoradb/postgres-walg:${{ inputs.tag || github.ref_name }}

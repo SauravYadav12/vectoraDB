@@ -76,18 +76,25 @@ func imageExists() bool {
 	return exec.Command("sudo", "docker", "image", "inspect", image).Run() == nil
 }
 
-// ensureImage guarantees the Postgres+wal-g image is present, building it from a
-// discovered (or configured) context when it is not already available locally.
+// ensureImage guarantees the Postgres+wal-g image is present. It prefers pulling
+// the published multi-arch image (fast, and independent of the wal-g release
+// being reachable at install time) and falls back to building from the repo
+// context — for contributors, offline installs, or before the image is
+// published.
 func ensureImage() error {
 	if imageExists() {
 		return nil
 	}
+	fmt.Printf("Fetching image %s…\n", image)
+	if run("docker", "pull", image) == nil {
+		return nil
+	}
 	ctx := envOr(envImageContext, findImageContext())
 	if ctx == "" {
-		return fmt.Errorf("image %s is missing and no build context was found — "+
+		return fmt.Errorf("image %s could not be pulled and no build context was found — "+
 			"set %s to the docker/postgres directory, or pre-build the image", image, envImageContext)
 	}
-	fmt.Printf("Building image %s from %s (first run only, this can take a minute)…\n", image, ctx)
+	fmt.Printf("Building image %s from %s (this can take a minute)…\n", image, ctx)
 	return run("docker", "build", "-t", image, ctx)
 }
 

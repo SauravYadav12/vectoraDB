@@ -28,7 +28,7 @@ const (
 	datasetBase = "vectoradb/branches"
 	mountBase   = "/vectoradb/branches"
 	network     = "vectoradb"
-	image       = "vectoradb/postgres-walg:16"
+	image       = "ghcr.io/vectoradb/postgres-walg:16"
 	// Throwaway loader images used by the migration adapters, run on the shared
 	// network so they can reach both the source and the target instance.
 	// pgloaderImage is built locally on first use — Debian packages pgloader for
