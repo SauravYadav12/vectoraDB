@@ -103,20 +103,17 @@ func startContainer(name string, primary bool) error {
 		"-e", "PGDATA=/var/lib/postgresql/data/pgdata",
 		"-v", mountpoint(name) + ":/var/lib/postgresql/data",
 	}
-	// Bind published ports to the guest's loopback only, so branch Postgres is
-	// reachable by the in-guest gateway but NOT forwarded out of the VM to the
-	// host/LAN (Lima/WSL only forward 0.0.0.0 binds). This closes the path where
-	// a client hits a branch port directly, bypassing the gateway, its API key,
-	// TLS, and ledger attribution. VECTORADB_DEBUG_PORTS republishes to the host.
-	bind := "127.0.0.1:"
+	// Branch Postgres is reached by the in-guest gateway over the docker network
+	// (BackendAddr -> containerIP), so no host port is published by default. That
+	// keeps branch databases unreachable from outside the VM, where a direct
+	// connection would bypass the gateway, its API key, TLS, and ledger
+	// attribution. VECTORADB_DEBUG_PORTS publishes a host port for debugging.
 	if os.Getenv("VECTORADB_DEBUG_PORTS") != "" {
-		bind = ""
-	}
-	if primary {
-		// The primary on a stable port; branches on an ephemeral one.
-		args = append(args, "-p", bind+"5432:5432")
-	} else {
-		args = append(args, "-p", bind+"0:5432")
+		if primary {
+			args = append(args, "-p", "5432:5432")
+		} else {
+			args = append(args, "-p", "0:5432")
+		}
 	}
 	if primary {
 		args = append(args,
@@ -466,22 +463,28 @@ type Info struct {
 
 func agentBranch(id string) string { return "agent-" + id }
 
-func dsn(port string) string {
-	return fmt.Sprintf("postgresql://%s:%s@127.0.0.1:%s/%s", pgUser, pgPass(), port, pgDatabase)
+func dsn(host, port string) string {
+	return fmt.Sprintf("postgresql://%s:%s@%s:%s/%s", pgUser, pgPass(), host, port, pgDatabase)
 }
 
-// portOf returns the ephemeral host port docker published for a container's
-// Postgres (mapped from container port 5432).
-func portOf(cont string) (string, error) {
-	out, err := capture("docker", "port", cont, "5432/tcp")
+// containerIP returns a container's IP on the vectoradb docker network. The
+// in-guest gateway routes to it directly, so branch Postgres needs no published
+// host port and stays unreachable from outside the VM.
+func containerIP(cont string) (string, error) {
+	out, err := capture("docker", "inspect", "-f",
+		fmt.Sprintf("{{.NetworkSettings.Networks.%s.IPAddress}}", network), cont)
 	if err != nil {
 		return "", err
 	}
-	return parsePublishedPort(out)
+	ip := strings.TrimSpace(out)
+	if ip == "" {
+		return "", fmt.Errorf("container %q has no IP on the %q network", cont, network)
+	}
+	return ip, nil
 }
 
 // parsePublishedPort extracts the host port from `docker port` output such as
-// "0.0.0.0:32781\n[::]:32781".
+// "0.0.0.0:32781\n[::]:32781". Retained for VECTORADB_DEBUG_PORTS tooling.
 func parsePublishedPort(out string) (string, error) {
 	line := out
 	if i := strings.IndexByte(out, '\n'); i >= 0 {
@@ -494,8 +497,6 @@ func parsePublishedPort(out string) (string, error) {
 	return strings.TrimSpace(line[i+1:]), nil
 }
 
-func branchPort(name string) (string, error) { return portOf(container(name)) }
-
 // CreateAgentBranch gives agent id its own instant branch and returns how to
 // connect to it.
 func CreateAgentBranch(agentID string) (Info, error) {
@@ -503,7 +504,7 @@ func CreateAgentBranch(agentID string) (Info, error) {
 	if err := Create(name, "main"); err != nil {
 		return Info{}, err
 	}
-	port, err := branchPort(name)
+	ip, err := containerIP(container(name))
 	if err != nil {
 		return Info{}, err
 	}
@@ -513,7 +514,10 @@ func CreateAgentBranch(agentID string) (Info, error) {
 	_ = psqlStdin(name, fmt.Sprintf(
 		"ALTER DATABASE %s SET vdb.actor = '%s'; ALTER DATABASE %s SET vdb.actor_kind = 'agent';",
 		pgDatabase, actor, pgDatabase))
-	return Info{Agent: agentID, Branch: name, Host: "127.0.0.1", Port: port, DSN: dsn(port), Status: "ready"}, nil
+	// The DSN reaches the branch over the docker network (VM-internal); a host
+	// agent should connect through the gateway. A gateway-routed, key-scoped DSN
+	// is the planned replacement.
+	return Info{Agent: agentID, Branch: name, Host: ip, Port: "5432", DSN: dsn(ip, "5432"), Status: "ready"}, nil
 }
 
 // DeleteAgentBranch tears down agent id's branch.
@@ -532,11 +536,11 @@ func BackendAddr(name string) (string, error) {
 	if name == "main" {
 		cont = PrimaryContainer()
 	}
-	port, err := portOf(cont)
+	ip, err := containerIP(cont)
 	if err != nil {
 		return "", err
 	}
-	return "127.0.0.1:" + port, nil
+	return ip + ":5432", nil
 }
 
 // primaryFile records which branch container currently serves as the "main"
@@ -599,9 +603,7 @@ func Branches() ([]BranchInfo, error) {
 			State:   ContainerState(name),
 		}
 		if bi.State == "running" {
-			if p, err := branchPort(name); err == nil {
-				bi.Port = p
-			}
+			bi.Port = "5432" // in-container port; branches are reached via the gateway
 			if c, err := ActiveConnections(name); err == nil {
 				bi.Connections = c
 			}
@@ -728,10 +730,10 @@ func ListAgentBranches() ([]Info, error) {
 	var infos []Info
 	for _, n := range strings.Fields(out) {
 		bn := strings.TrimPrefix(n, "vec-")
-		port, _ := branchPort(bn)
+		ip, _ := containerIP(n)
 		infos = append(infos, Info{
 			Agent:  strings.TrimPrefix(bn, "agent-"),
-			Branch: bn, Host: "127.0.0.1", Port: port, DSN: dsn(port), Status: "ready",
+			Branch: bn, Host: ip, Port: "5432", DSN: dsn(ip, "5432"), Status: "ready",
 		})
 	}
 	return infos, nil

@@ -82,11 +82,44 @@ func EnsureCert() (certPath, keyPath string, err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", fmt.Errorf("create tls dir: %w", err)
 	}
-	if err := generateSelfSigned(certPath, keyPath); err != nil {
+	// Serialize generation across processes. The gateway, control-plane, and
+	// agent API all start together and all call EnsureCert; without a lock they
+	// each generate a keypair and interleave writes, leaving a cert.pem and
+	// key.pem from different keypairs ("private key does not match public key").
+	if err := withFileLock(filepath.Join(dir, ".lock"), func() error {
+		if fileExists(certPath) && fileExists(keyPath) {
+			return nil // another process generated it while we waited
+		}
+		return generateSelfSigned(certPath, keyPath)
+	}); err != nil {
 		return "", "", err
 	}
 	cachedC, cachedK = certPath, keyPath
 	return certPath, keyPath, nil
+}
+
+// withFileLock runs fn while holding an exclusive lock file, so only one process
+// generates the certificate at a time. A waiter re-checks for the files (fn is a
+// no-op if they now exist). A lock older than the timeout is treated as stale
+// (its holder died) and stolen.
+func withFileLock(lockPath string, fn func() error) error {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			f.Close()
+			defer os.Remove(lockPath)
+			return fn()
+		}
+		if !os.IsExist(err) {
+			return fmt.Errorf("tls lock: %w", err)
+		}
+		if time.Now().After(deadline) {
+			_ = os.Remove(lockPath) // steal a stale lock
+			continue
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // ServerConfig returns a *tls.Config that serves the EnsureCert pair. The
