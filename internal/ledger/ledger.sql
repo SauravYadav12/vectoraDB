@@ -196,7 +196,9 @@ END;
 $$;
 CREATE OR REPLACE TRIGGER vdb_append_only BEFORE UPDATE OR DELETE ON vdb.schema_ledger
   FOR EACH ROW EXECUTE FUNCTION vdb.deny_change();
-REVOKE UPDATE, DELETE ON vdb.schema_ledger FROM PUBLIC;
+CREATE OR REPLACE TRIGGER vdb_no_truncate BEFORE TRUNCATE ON vdb.schema_ledger
+  FOR EACH STATEMENT EXECUTE FUNCTION vdb.deny_change();
+REVOKE UPDATE, DELETE, TRUNCATE ON vdb.schema_ledger FROM PUBLIC;
 
 CREATE EVENT TRIGGER vdb_guard_start ON ddl_command_start
   EXECUTE FUNCTION vdb.guard_ddl_start();

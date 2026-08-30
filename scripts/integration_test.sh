@@ -80,7 +80,9 @@ $S ha disable >/dev/null 2>&1
 
 echo "### 8. schema ledger (RECORD layer)"
 pg vec-main "SET vdb.allow_destructive=on; DROP TABLE IF EXISTS ledg CASCADE" >/dev/null 2>&1
-pg vec-main "DELETE FROM vdb.schema_ledger" >/dev/null 2>&1
+# Clean slate: the ledger is append-only now, so clearing it for a deterministic
+# count requires deliberately disabling triggers (session_replication_role).
+pg vec-main "SET session_replication_role=replica; DELETE FROM vdb.schema_ledger; SET session_replication_role=DEFAULT" >/dev/null 2>&1
 PGPASSWORD="$KEY" psql "$GATEWAY/main" -qc "CREATE TABLE ledg(x int)" >/dev/null 2>&1
 assert_eq "ledger captures DDL, attributed to the human key" \
   "$(pg vec-main "SELECT actor_kind FROM vdb.schema_ledger WHERE command_tag='CREATE TABLE' AND object_identity='public.ledg'")" "human"
@@ -88,6 +90,11 @@ BLK="$(PGPASSWORD="$KEY" psql "$GATEWAY/main" -qc "DROP TABLE ledg" 2>&1 | grep 
 assert_eq "guardrail blocks a destructive DROP" "$BLK" "1"
 assert_eq "blocked attempt is recorded durably" \
   "$(pg vec-main "SELECT count(*) FROM vdb.schema_ledger WHERE status='BLOCKED' AND command_tag='DROP TABLE'")" "1"
+# Tamper-evidence: the ledger is append-only, and the hash chain verifies intact.
+assert_eq "ledger is append-only (a plain DELETE is blocked)" \
+  "$(pg vec-main "DELETE FROM vdb.schema_ledger WHERE id=(SELECT max(id) FROM vdb.schema_ledger)" 2>&1 | grep -c 'append-only')" "1"
+assert_eq "hash chain verifies intact (0 broken rows)" \
+  "$(pg vec-main "SELECT count(*) FROM (SELECT (row_hash <> vdb._ledger_hash(s.*) OR prev_hash IS DISTINCT FROM coalesce(lag(row_hash) OVER (ORDER BY id),'')) AS broken FROM vdb.schema_ledger s WHERE row_hash IS NOT NULL) x WHERE broken")" "0"
 pg vec-main "SET vdb.allow_destructive=on; DROP TABLE IF EXISTS ledg" >/dev/null 2>&1
 
 echo "### 9. ETL pipeline (extract -> transform -> test)"
