@@ -98,16 +98,48 @@ make -j"$(nproc)"
 make DESTDIR="$stage" INSTALL_MOD_PATH="$stage" install
 
 echo "==> package"
-# Drop libtool archives and build-tree symlinks; keep modules + userland.
+# Drop libtool archives and build-tree symlinks.
 find "$stage" -name '*.la' -delete
 rm -f "$stage/lib/modules/$KREL/build" "$stage/lib/modules/$KREL/source"
-tarball="$out/vectoradb-zfs-$KREL.tar.gz"
-tar -C "$stage" -czf "$tarball" .
+
+# Split the output in two, because only half of it depends on the kernel:
+#
+#   modules  (zfs.ko, spl.ko)  -- tied to one exact kernel by vermagic
+#   userland (zpool, zfs, libs, systemd units) -- tied only to the ZFS version
+#
+# The userland is baked into the prebuilt distro image, so a user downloads it
+# once; only the modules are fetched per kernel. Keeping them apart is what makes
+# a WSL kernel bump a 2 MB re-fetch instead of an 80 MB one. Both halves come
+# from this single build, so they cannot drift in version.
+#
+# Stripping matters more than it sounds: zfs.ko is 89 MB built and 9 MB stripped,
+# almost entirely DWARF debug info that is useless on a user's machine. The
+# compressed module bundle goes from 28 MB to 2.3 MB. vermagic and modinfo
+# survive --strip-debug, which is what modprobe actually checks.
+strip --strip-debug "$stage/lib/modules/$KREL/extra"/*.ko
+modules_dir="$work/modules"
+find "$modules_dir" -mindepth 1 -delete 2>/dev/null || true
+mkdir -p "$modules_dir/lib/modules/$KREL"
+cp -a "$stage/lib/modules/$KREL/extra" "$modules_dir/lib/modules/$KREL/extra"
+
+modules_tar="$out/vectoradb-zfs-modules-$KREL.tar.gz"
+tar -C "$modules_dir" -czf "$modules_tar" .
+
+# Userland is everything except the modules.
+userland_dir="$work/userland"
+find "$userland_dir" -mindepth 1 -delete 2>/dev/null || true
+mkdir -p "$userland_dir"
+cp -a "$stage/." "$userland_dir/"
+rm -rf "$userland_dir/lib/modules"
+userland_tar="$out/vectoradb-zfs-userland.tar.gz"
+tar -C "$userland_dir" -czf "$userland_tar" .
+
 printf '%s\n' "$KREL" > "$out/vectoradb-zfs.release"
 
 echo
-echo "zfs modules + userland: $tarball"
-echo "kernel release:         $out/vectoradb-zfs.release ($KREL)"
+echo "zfs modules (per kernel): $modules_tar"
+echo "zfs userland (shared):    $userland_tar"
+echo "kernel release:           $out/vectoradb-zfs.release ($KREL)"
 echo
-echo 'Attach both to the GitHub release; install.ps1 stages them and `vdb setup`'
-echo "extracts the tarball into the vectoradb distro, then runs depmod + modprobe zfs."
+echo "The userland is baked into the distro image by deploy/wsl-distro/build.sh."
+echo "Only the modules tarball is a per-kernel release asset."

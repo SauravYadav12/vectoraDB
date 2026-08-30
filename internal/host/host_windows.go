@@ -5,14 +5,20 @@
 package host
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/vectoradb/vectoradb/internal/version"
 )
 
 // hostSetup is the Windows bootstrap: ensure a ZFS-capable WSL2 distro and bring
@@ -103,11 +109,41 @@ func forwardStdin(args []string, stdin io.Reader) error {
 	return cmd.Run()
 }
 
+// forwardQuiet forwards a command with its output logged rather than printed.
+//
+// Only setup uses it. The engine's own `vdb start` is worth watching when a user
+// types it, but during an install the image build and registry pulls are several
+// hundred lines that bury the progress the user actually wants to see.
+func forwardQuiet(args []string) error {
+	name := currentDistro()
+	guest := guestBin(name)
+	out, err := exec.Command("wsl.exe", wslArgs(name, guest, guestEnv(), args)...).CombinedOutput()
+	text := decodeWSLOutput(out)
+	logf("$ vdb %s\n%s\n", strings.Join(args, " "), text)
+	if err != nil {
+		return fmt.Errorf("%w\n%s", err, lastLines(text, 20))
+	}
+	return nil
+}
+
 // wsl runs an interactive wsl.exe command wired to the console.
 func wsl(args ...string) *exec.Cmd {
 	cmd := exec.Command("wsl.exe", args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd
+}
+
+// wslQuiet runs a wsl.exe management command with its output logged rather than
+// printed. wsl.exe narrates routine success ("The operation completed
+// successfully.") in UTF-16, which is noise during setup and renders badly.
+func wslQuiet(args ...string) error {
+	out, err := exec.Command("wsl.exe", args...).CombinedOutput()
+	text := decodeWSLOutput(out)
+	logf("$ wsl %s\n%s\n", strings.Join(args, " "), text)
+	if err != nil {
+		return fmt.Errorf("%w\n%s", err, lastLines(text, 10))
+	}
+	return nil
 }
 
 // guestPath prefixes setup scripts that use the ZFS userland. It installs under
@@ -116,10 +152,60 @@ func wsl(args ...string) *exec.Cmd {
 // the setup scripts state it rather than assume it.
 const guestPath = "export PATH=/usr/local/sbin:/usr/local/bin:$PATH"
 
+// setupLog is the transcript of everything setup runs in the guest. apt and
+// docker are extremely chatty, and streaming them made a working install look
+// alarming and a broken one impossible to read. The detail goes here instead,
+// and is surfaced on failure.
+func setupLogPath() string { return filepath.Join(installDir(), "install.log") }
+
+// logf appends to the setup log. Logging is best-effort: failing to write a log
+// must never fail an install.
+func logf(format string, args ...any) {
+	f, err := os.OpenFile(setupLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, format, args...)
+}
+
+// step announces a stage before running it, so a stall is attributable to a
+// named step rather than to silence.
+func step(msg string) {
+	fmt.Printf("  %s…\n", msg)
+	logf("\n=== %s ===\n", msg)
+}
+
 // wslRoot runs a shell command inside the distro as root (setup steps need
-// privilege without a sudo password prompt).
+// privilege without a sudo password prompt), capturing its output to the setup
+// log rather than the console.
+//
+// On failure the captured tail is included in the error, so the detail appears
+// exactly when it is wanted and nowhere else.
 func wslRoot(name, script string) error {
-	return wsl("-d", name, "-u", "root", "--", "sh", "-c", script).Run()
+	cmd := exec.Command("wsl.exe", "-d", name, "-u", "root", "--", "sh", "-c", script)
+	out, err := cmd.CombinedOutput()
+	text := decodeWSLOutput(out)
+	logf("$ %s\n%s\n", script, text)
+	if err != nil {
+		return fmt.Errorf("%w\n%s", err, lastLines(text, 15))
+	}
+	return nil
+}
+
+// lastLines returns the final n non-empty lines, the part of a failed command's
+// output that actually says what went wrong.
+func lastLines(s string, n int) string {
+	var keep []string
+	for _, ln := range strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n") {
+		if strings.TrimSpace(ln) != "" {
+			keep = append(keep, strings.TrimRight(ln, "\r"))
+		}
+	}
+	if len(keep) > n {
+		keep = keep[len(keep)-n:]
+	}
+	return strings.Join(keep, "\n")
 }
 
 // wslRootOut is wslRoot but captures stdout, for probes.
@@ -139,9 +225,12 @@ func setupWindows() error {
 			"and the 'Virtual Machine Platform' feature on?). Run `wsl --install` / `wsl --update`, then retry")
 	}
 
+	fmt.Println("Setting up VectoraDB…")
+	logf("\n---- vdb setup %s ----\n", version.Version)
+
 	name := currentDistro()
 	if distroExists(name) {
-		fmt.Printf("WSL distro %q already exists.\n", name)
+		step(fmt.Sprintf("Reusing the existing %q distro", name))
 	} else if err := importDistro(name); err != nil {
 		return err
 	}
@@ -163,9 +252,10 @@ func setupWindows() error {
 	if err := verifyZFS(name); err != nil {
 		return err
 	}
-	err := forward([]string{"start"})
+	step("Starting VectoraDB")
+	err := forwardQuiet([]string{"start"})
 	if err == nil {
-		return shareMountPropagation(name)
+		return finishSetup(name)
 	}
 	// One retry, because the very first start races the Postgres container's
 	// initdb: the engine connects as soon as the socket appears, but the
@@ -176,11 +266,27 @@ func setupWindows() error {
 	//
 	// This compensates for an engine-side readiness check; if that gains a
 	// proper wait, drop this.
-	fmt.Println("First start raced container initialisation — retrying…")
-	if err := forward([]string{"start"}); err != nil {
+	step("Retrying (the first start raced container initialisation)")
+	if err := forwardQuiet([]string{"start"}); err != nil {
 		return err
 	}
-	return shareMountPropagation(name)
+	return finishSetup(name)
+}
+
+// finishSetup completes a successful setup and tells the user what they have.
+//
+// The engine's own start banner is captured during setup, so without this the
+// install would end in silence.
+func finishSetup(name string) error {
+	if err := shareMountPropagation(name); err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Println("VectoraDB is running.")
+	fmt.Println("  Try:      vdb status")
+	fmt.Println("  Connect:  postgres://vectoradb@localhost:6432/main")
+	fmt.Println("  Log:      " + setupLogPath())
+	return nil
 }
 
 // shareMountPropagation puts the pool's mounts under shared propagation, once
@@ -208,8 +314,8 @@ func importDistro(name string) error {
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		return err
 	}
-	fmt.Printf("Creating the %q WSL distro…\n", name)
-	if err := wsl("--import", name, installDir, rootfs).Run(); err != nil {
+	step(fmt.Sprintf("Creating the %q WSL distro", name))
+	if err := wslQuiet("--import", name, installDir, rootfs); err != nil {
 		return fmt.Errorf("importing the WSL distro: %w", err)
 	}
 	// systemd for `systemctl enable --now docker` and the ZFS import units;
@@ -225,7 +331,7 @@ func importDistro(name string) error {
 	}
 	// The distro must restart to pick up /etc/wsl.conf. The caller waits for
 	// systemd to come back, on this path and on the already-exists path alike.
-	if err := wsl("--terminate", name).Run(); err != nil {
+	if err := wslQuiet("--terminate", name); err != nil {
 		return fmt.Errorf("restarting the distro to apply systemd: %w", err)
 	}
 	return nil
@@ -235,15 +341,19 @@ func importDistro(name string) error {
 // distro is restarted right before this to pick up /etc/wsl.conf, and systemctl
 // calls issued during that window fail with "system has not been booted".
 func waitForSystemd(name string) error {
-	fmt.Print("Waiting for systemd in the distro…")
-	defer fmt.Println()
+	// Announced only if it actually takes a moment: on a warm distro systemd is
+	// already up and a progress line for a no-op is just noise.
+	announced := false
 	for i := 0; i < 60; i++ {
 		out, _ := wslRootOut(name, "systemctl is-system-running 2>&1 || true")
 		switch strings.TrimSpace(decodeWSLOutput(out)) {
 		case "running", "degraded":
 			return nil
 		}
-		fmt.Print(".")
+		if !announced {
+			step("Waiting for the distro to finish booting")
+			announced = true
+		}
 		time.Sleep(time.Second)
 	}
 	return fmt.Errorf("systemd did not finish booting in the %q distro after 60s — "+
@@ -263,10 +373,42 @@ func provisionGuestWSL(name string) error {
 	if err := ensureZpoolDevice(name); err != nil {
 		return err
 	}
+	if err := loadPreloadedImages(name); err != nil {
+		return err
+	}
 	if err := stageImageContext(name); err != nil {
 		return err
 	}
 	return installGuestBinaryWSL(name)
+}
+
+// loadPreloadedImages imports the container images baked into the distro image.
+//
+// The prebuilt distro ships them as a docker save tarball rather than a
+// populated layer store, because building that store would mean running a second
+// dockerd inside a chroot on the builder. Loading here is local disk work and
+// replaces a docker build plus three registry pulls — the slowest and least
+// reliable part of a first start.
+//
+// A plain Ubuntu rootfs has no tarball, in which case this is a no-op and the
+// engine builds and pulls as before.
+func loadPreloadedImages(name string) error {
+	const tar = "/usr/local/share/vectoradb/images/vectoradb-images.tar"
+	if wslRoot(name, fmt.Sprintf("test -f %q", tar)) != nil {
+		return nil
+	}
+	// Already loaded (a re-run): the engine's own check is `docker image
+	// inspect`, so match it rather than guessing from the tarball's presence.
+	if wslRoot(name, "docker image inspect vectoradb/postgres-walg:16 >/dev/null 2>&1") == nil {
+		return nil
+	}
+	step("Loading the preinstalled container images")
+	if err := wslRoot(name, fmt.Sprintf("set -e; docker load -i %q", tar)); err != nil {
+		// Not fatal: the engine can still build and pull. Losing the fast path
+		// is better than failing an install over it.
+		logf("loading preinstalled images failed, falling back to build/pull: %v\n", err)
+	}
+	return nil
 }
 
 // zpoolUpScript attaches the pool image to a fixed loop device and imports the
@@ -299,6 +441,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:$PATH
 IMG=/var/lib/vectoradb-zpool.img
 DEV=/dev/vectoradb-pool
 SIZE="${VECTORADB_ZPOOL_SIZE:-30G}"
+MODSRC=/usr/local/lib/vectoradb/modules
 
 # Mount the datasets and put them under shared propagation.
 #
@@ -318,7 +461,31 @@ finish() {
 	mount --make-rshared /vectoradb 2>/dev/null || true
 }
 
-modprobe zfs
+# Put the ZFS modules back before anything needs them.
+#
+# /usr/lib/modules/<rel> is an overlay whose upper layer lives in the WSL VM, not
+# on this distro's disk: it survives 'wsl --terminate' but not a VM shutdown, and
+# WSL shuts the VM down on its own once the last distro goes idle. So the modules
+# are kept under /usr/local (a real filesystem) and reinstated here at every boot.
+# Without this, ZFS quietly disappears between sessions and the pool -- the user's
+# data -- cannot be imported.
+ensure_modules() {
+	if modprobe zfs 2>/dev/null; then
+		return 0
+	fi
+	K="$(uname -r)"
+	if [ ! -d "$MODSRC/$K" ]; then
+		echo "vectoradb: no ZFS modules for kernel $K." >&2
+		echo "vectoradb: run 'vdb setup' to install them." >&2
+		exit 1
+	fi
+	mkdir -p "/usr/lib/modules/$K/extra"
+	cp -a "$MODSRC/$K/." "/usr/lib/modules/$K/extra/"
+	depmod -a "$K"
+	modprobe zfs
+}
+
+ensure_modules
 [ -f "$IMG" ] || truncate -s "$SIZE" "$IMG"
 
 # Bind the image to exactly one loop device, and expose it under a stable name.
@@ -459,7 +626,7 @@ WantedBy=multi-user.target
 
 // ensureZpoolDevice installs and enables the loop-device unit above.
 func ensureZpoolDevice(name string) error {
-	fmt.Println("Preparing the ZFS pool device…")
+	step("Preparing the ZFS pool device")
 	// Masking happens here, not in installZFS, because installZFS short-circuits
 	// once ZFS works — this must also reach distros provisioned by an older
 	// build. zfs-import-scan runs `zpool import -aN -d /dev`, and that wide scan
@@ -516,10 +683,12 @@ func writeFileB64(path, content string) string {
 // supplied by interop.
 func installDocker(name string) error {
 	if wslRoot(name, "test -x /usr/bin/dockerd") == nil {
-		// Still ensure it is running: WSL starts distros with nothing up.
+		// Already present — either a previous setup installed it, or it came
+		// baked into the prebuilt distro image. Still ensure it is running: WSL
+		// starts distros with nothing up.
 		return wslRoot(name, "systemctl enable --now docker")
 	}
-	fmt.Println("Installing Docker in the WSL distro…")
+	step("Installing Docker in the WSL distro")
 	// Acquire::Retries because a single flaky mirror connection should not end a
 	// setup run — Ubuntu's mirrors resolve to both IPv6 and IPv4, and a stalled
 	// IPv4 path otherwise leaves docker.io with "no installation candidate".
@@ -568,15 +737,23 @@ func installZFS(name string) error {
 	if wslRoot(name, guestPath+"; modprobe zfs 2>/dev/null && zfs version >/dev/null 2>&1") == nil {
 		return nil
 	}
+	// A release from before the modules/userland split ships one combined
+	// bundle; prefer the split one but accept either, so a pinned vdb.exe keeps
+	// working against its own release.
 	bundle := bundledAsset(zfsBundleName(rel))
 	if bundle == "" {
-		return fmt.Errorf("no ZFS bundle for this WSL kernel (%s).\n"+
-			"Expected %s next to vdb.exe.\n"+
-			"Your WSL kernel is newer than this VectoraDB release — update VectoraDB, "+
-			"or build the bundle with `make wsl-zfs` (see docs/windows-setup.md)",
-			rel, zfsBundleName(rel))
+		bundle = bundledAsset(legacyZFSBundleName(rel))
 	}
-	fmt.Printf("Installing ZFS for kernel %s…\n", rel)
+	if bundle == "" {
+		// Not staged: fetch the one this kernel needs. This is the first moment
+		// the right file is knowable — the installer runs before WSL may even
+		// exist, which is why it no longer tries to choose.
+		var err error
+		if bundle, err = fetchZFSBundle(rel); err != nil {
+			return err
+		}
+	}
+	step("Installing ZFS for kernel " + rel)
 	// The tarball lands modules under lib/modules/<rel>/extra (which usrmerge
 	// resolves into the writable module overlay) and userland under /usr/local.
 	// daemon-reload is required before enabling: the units arrive with the
@@ -595,16 +772,202 @@ func installZFS(name string) error {
 	// and /lib is a symlink to /usr/lib on a usrmerged Ubuntu. Without the flag
 	// tar replaces that symlink with a real directory and splits the distro's
 	// libraries in two.
+	// A persistent copy is kept alongside the overlay install, because the module
+	// tree is NOT durable: /usr/lib/modules/<rel> is an overlay whose upper layer
+	// lives in the WSL VM's own namespace, not on this distro's disk. It survives
+	// `wsl --terminate` but is destroyed when the VM shuts down — which WSL does
+	// on its own once the last distro goes idle. Without the copy, ZFS silently
+	// disappears between sessions and the pool cannot be imported.
+	// vectoradb-zpool.service reinstalls from modulesDir at every boot.
 	script := fmt.Sprintf("set -e; %s; tar -C / --keep-directory-symlink -xzf %q; "+
+		"mkdir -p %q/%q; cp -a /usr/lib/modules/%q/extra/. %q/%q/; "+
 		"depmod -a %q; ldconfig; modprobe zfs; "+
 		"systemctl daemon-reload; "+
 		"systemctl mask zfs-import-scan.service zfs-import-cache.service >/dev/null 2>&1 || true; "+
 		"systemctl enable --now zfs-mount.service zfs.target",
-		guestPath, winPathToMnt(bundle), rel)
+		guestPath, winPathToMnt(bundle),
+		guestModulesDir, rel, rel, guestModulesDir, rel,
+		rel)
 	if err := wslRoot(name, script); err != nil {
 		return fmt.Errorf("installing ZFS into the distro: %w", err)
 	}
 	return nil
+}
+
+// fetchZFSBundle downloads the ZFS bundle for a kernel release and caches it
+// next to vdb.exe, so a later setup (or a re-run after a distro wipe) is offline.
+//
+// It downloads to a temporary file and renames on success: a half-written bundle
+// left under the real name would be found by bundledAsset next time and fail as
+// a corrupt archive, which is a far more confusing error than a missing file.
+func fetchZFSBundle(kernelRelease string) (string, error) {
+	if err := os.MkdirAll(installDir(), 0o755); err != nil {
+		return "", err
+	}
+	step("Downloading ZFS for kernel " + kernelRelease)
+
+	// Try the split module bundle first, then the combined one. Which exists
+	// depends on the release this binary was stamped for, and a 404 on the first
+	// is the normal case against an older release rather than an error.
+	var lastErr error
+	for _, asset := range []string{zfsBundleName(kernelRelease), legacyZFSBundleName(kernelRelease)} {
+		url := releaseAssetURL(vectoradbRepo, version.Version, asset)
+		dst := filepath.Join(installDir(), asset)
+		err := downloadResumable(url, dst, asset)
+		if err == nil {
+			if err := verifyReleaseAsset(dst, asset); err != nil {
+				os.Remove(dst)
+				return "", err
+			}
+			return dst, nil
+		}
+		if !errors.Is(err, errAssetNotFound) {
+			return "", err
+		}
+		lastErr = err
+		logf("no %s in this release, trying the next name\n", asset)
+	}
+	return "", fmt.Errorf("no ZFS module bundle published for this WSL kernel (%s).\n"+
+		"VectoraDB ships the ZFS module built for one exact kernel, and yours is not among them.\n"+
+		"Check for a newer VectoraDB release, or build it yourself with `make wsl-zfs`.\n"+
+		"  (%v)", kernelRelease, lastErr)
+}
+
+// verifyReleaseAsset checks a downloaded asset against the release's SHA256SUMS.
+//
+// The bundle is unpacked into the distro and its modules are loaded into the
+// kernel, so "it came over TLS" is not on its own a good enough answer to what
+// this file is. A release with no SHA256SUMS is not a failure — releases predate
+// the file — but a listed asset whose hash disagrees is.
+func verifyReleaseAsset(path, asset string) error {
+	want, err := releaseChecksum(asset)
+	if err != nil {
+		logf("checksum lookup for %s skipped: %v\n", asset, err)
+		return nil
+	}
+	if want == "" {
+		logf("%s is not listed in SHA256SUMS; skipping verification\n", asset)
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	got := hex.EncodeToString(h.Sum(nil))
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("checksum mismatch for %s\n  expected %s\n  got      %s\n"+
+			"The download does not match what this VectoraDB release published. "+
+			"It was discarded; re-run `vdb setup` to try again", asset, want, got)
+	}
+	logf("checksum OK for %s\n", asset)
+	return nil
+}
+
+// releaseChecksum returns the expected SHA256 for an asset, or "" when the
+// release lists no such file.
+func releaseChecksum(asset string) (string, error) {
+	resp, err := http.Get(releaseAssetURL(vectoradbRepo, version.Version, "SHA256SUMS"))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("SHA256SUMS: %s", resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	return checksumFor(string(body), asset), nil
+}
+
+// downloadResumable fetches url to dst, resuming and retrying on a dropped
+// connection.
+//
+// This matters more than it looks: the bundle is ~85 MB, and a single dropped
+// connection on an ordinary home network otherwise fails the whole install with
+// a wsarecv error and leaves a half-created distro behind. Progress is kept in a
+// .part file so a retry continues rather than starting again.
+func downloadResumable(url, dst, asset string) error {
+	part := dst + ".part"
+	const attempts = 4
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var have int64
+		if fi, err := os.Stat(part); err == nil {
+			have = fi.Size()
+		}
+
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		if have > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+		}
+
+		resp, err := (&http.Client{Timeout: 30 * time.Minute}).Do(req)
+		if err != nil {
+			lastErr = err
+			logf("download attempt %d/%d failed: %v\n", attempt, attempts, err)
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			continue
+		}
+
+		switch resp.StatusCode {
+		case http.StatusNotFound:
+			resp.Body.Close()
+			return fmt.Errorf("%w: %s", errAssetNotFound, url)
+		case http.StatusOK:
+			// The server ignored our Range (or we had nothing): start over.
+			have = 0
+		case http.StatusPartialContent:
+			// Resuming where we left off.
+		default:
+			resp.Body.Close()
+			lastErr = fmt.Errorf("%s", resp.Status)
+			logf("download attempt %d/%d: %s\n", attempt, attempts, resp.Status)
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			continue
+		}
+
+		flags := os.O_CREATE | os.O_WRONLY
+		if have > 0 {
+			flags |= os.O_APPEND
+		} else {
+			flags |= os.O_TRUNC
+		}
+		f, err := os.OpenFile(part, flags, 0o644)
+		if err != nil {
+			resp.Body.Close()
+			return err
+		}
+		_, copyErr := io.Copy(f, resp.Body)
+		resp.Body.Close()
+		if closeErr := f.Close(); copyErr == nil {
+			copyErr = closeErr
+		}
+		if copyErr != nil {
+			lastErr = copyErr
+			logf("download attempt %d/%d interrupted: %v\n", attempt, attempts, copyErr)
+			fmt.Printf("  download interrupted, resuming (%d/%d)…\n", attempt, attempts)
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			continue
+		}
+		if err := os.Rename(part, dst); err != nil {
+			return fmt.Errorf("saving %s: %w", asset, err)
+		}
+		return nil
+	}
+	return fmt.Errorf("downloading %s failed after %d attempts: %w\n"+
+		"Check your connection and re-run `vdb setup` — the partial download is resumed, not restarted",
+		asset, attempts, lastErr)
 }
 
 // verifyZFS is the gate on the whole approach: modules built for a different
@@ -629,13 +992,17 @@ func verifyZFS(name string) error {
 // finds nothing for a user who installed vdb rather than cloning the repo; the
 // forwarded environment points VECTORADB_IMAGE_CONTEXT here instead.
 func stageImageContext(name string) error {
-	src := bundledDir("docker-context")
-	if src == "" {
-		fmt.Println("Note: no bundled docker build context found — `vdb start` will look for " +
-			"docker/postgres relative to the current directory.")
+	// The prebuilt distro image already carries the context (and the built
+	// image), so there is nothing to stage.
+	if wslRoot(name, fmt.Sprintf("test -f %q/Dockerfile", guestImageContext)) == nil {
 		return nil
 	}
-	fmt.Println("Staging the Postgres image build context…")
+	src := bundledDir("docker-context")
+	if src == "" {
+		logf("no bundled docker build context; vdb start will look relative to the working directory\n")
+		return nil
+	}
+	step("Staging the Postgres image build context")
 	script := fmt.Sprintf("set -e; mkdir -p %q; cp -r %q/. %q/; chmod +x %q/restore-entrypoint.sh",
 		guestImageContext, winPathToMnt(src), guestImageContext, guestImageContext)
 	if err := wslRoot(name, script); err != nil {
@@ -655,9 +1022,25 @@ func installGuestBinaryWSL(name string) error {
 			"if you built it from source (VECTORADB_GUEST_BINARY overrides this).")
 		return nil
 	}
-	fmt.Println("Installing the vdb engine into the WSL distro…")
+	step("Installing the vdb engine into the WSL distro")
 	src := winPathToMnt(bin)
 	return wslRoot(name, fmt.Sprintf("install -m 0755 %q /usr/local/bin/vdb", src))
+}
+
+// vectoradbRepo is where setup fetches assets the installer did not stage.
+const vectoradbRepo = "SauravYadav12/vectoraDB"
+
+// errAssetNotFound distinguishes "this release has no such asset" from a real
+// download failure, so callers can try an alternative name rather than give up.
+var errAssetNotFound = errors.New("release asset not found")
+
+// installDir is the directory holding vdb.exe — where the installer stages
+// assets and where setup caches anything it downloads.
+func installDir() string {
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Dir(exe)
+	}
+	return filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "vectoradb")
 }
 
 // assetDirs lists the places the installer (or a dev build) puts support files,
@@ -701,11 +1084,21 @@ func bundledDir(basename string) string {
 
 // bundledRootfs finds the Ubuntu rootfs tarball, which install.ps1 fetches and
 // which `wsl --import` accepts gzipped or plain.
+// The prebuilt image comes first: it already contains Docker, the ZFS userland,
+// the engine and the container images, so importing it skips an apt install, a
+// docker build and three registry pulls. A plain Ubuntu rootfs still works, and
+// setup does that extra work itself.
 func bundledRootfs() string {
-	for _, n := range []string{"vectoradb-rootfs.tar.gz", "vectoradb-rootfs.tar"} {
+	for _, n := range []string{distroImageName, "vectoradb-rootfs.tar.gz", "vectoradb-rootfs.tar"} {
 		if p := bundledAsset(n); p != "" {
 			return p
 		}
 	}
 	return ""
+}
+
+// prebuiltDistro reports whether the imported distro came from our image, in
+// which case setup can skip what the image already did.
+func prebuiltDistro(name string) bool {
+	return wslRoot(name, "test -x /usr/bin/dockerd && test -x /usr/local/sbin/zpool") == nil
 }

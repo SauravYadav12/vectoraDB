@@ -3,7 +3,7 @@
 # VectoraDB runs inside the Linux dev VM (ZFS + Docker); day-to-day operation is
 # via `lima /tmp/vdb <command>`. This Makefile just builds/checks the CLI.
 
-.PHONY: build vet fmt vm-build test integration web-dev web-build release wsl-zfs
+.PHONY: build vet fmt vm-build test integration web-dev web-build release wsl-zfs wsl-distro
 
 VERSION ?= 0.1.0
 LDFLAGS := -s -w -X github.com/vectoradb/vectoradb/internal/version.Version=$(VERSION)
@@ -49,3 +49,6 @@ web-build:        ## Build the web UI to web/dist (same-origin; embedded into th
 
 wsl-zfs:          ## Build the OpenZFS modules + userland for the stock WSL2 kernel (Linux builder/CI only)
 	deploy/wsl-zfs/build.sh
+
+wsl-distro:       ## Build the prebuilt WSL2 distro image (Linux builder/CI with Docker)
+	deploy/wsl-distro/build.sh

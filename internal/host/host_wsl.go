@@ -7,6 +7,7 @@ package host
 
 import (
 	"bytes"
+	"path"
 	"strings"
 	"unicode/utf16"
 )
@@ -124,9 +125,75 @@ func parseKernelRelease(raw []byte) string {
 	return strings.TrimSpace(decodeWSLOutput(raw))
 }
 
-// zfsBundleName is the ZFS artifact for a kernel release. The release is part of
-// the filename because the modules only load against the exact kernel they were
-// built for — a stale bundle must be a missing file, not a silent mismatch.
+// zfsBundleName is the ZFS module artifact for a kernel release. The release is
+// part of the filename because the modules only load against the exact kernel
+// they were built for — a stale bundle must be a missing file, not a silent
+// mismatch.
+//
+// Modules only: the ZFS userland is kernel-independent and ships inside the
+// distro image, which is what keeps this download ~2 MB rather than ~80 MB.
 func zfsBundleName(kernelRelease string) string {
+	return "vectoradb-zfs-modules-" + strings.TrimSpace(kernelRelease) + ".tar.gz"
+}
+
+// legacyZFSBundleName is the pre-split artifact, carrying modules and userland
+// together. Releases before the split only have this one, so a vdb.exe pinned to
+// such a release must still be able to find it.
+func legacyZFSBundleName(kernelRelease string) string {
 	return "vectoradb-zfs-" + strings.TrimSpace(kernelRelease) + ".tar.gz"
+}
+
+// guestModulesDir is the durable home for the ZFS kernel modules inside the
+// distro, holding <rel>/*.ko.
+//
+// They cannot simply live in /usr/lib/modules/<rel>: that path is an overlay
+// whose upper layer belongs to the WSL VM rather than to this distro's disk. It
+// outlives `wsl --terminate` but not a VM shutdown, which WSL performs by itself
+// once the last distro is idle — so modules installed only there vanish between
+// sessions, taking the pool with them. vectoradb-zpool.service copies them back
+// into the overlay on every boot.
+const guestModulesDir = "/usr/local/lib/vectoradb/modules"
+
+// distroImageName is the prebuilt distro: Ubuntu with Docker, the ZFS userland,
+// the engine and the container images already in place. Importing it replaces
+// an apt install, a docker build and three registry pulls on the user's machine.
+const distroImageName = "vectoradb-distro.tar.gz"
+
+// checksumFor finds an asset's SHA256 in a sha256sum-style listing, or "" if the
+// listing does not mention it.
+//
+// Lines are "<64 hex>  <name>", with an optional leading "*" on the name for
+// binary mode. Matching is on the base name so a listing generated with paths
+// still resolves.
+func checksumFor(listing, asset string) string {
+	for _, ln := range strings.Split(strings.ReplaceAll(listing, "\r\n", "\n"), "\n") {
+		fields := strings.Fields(strings.TrimSpace(ln))
+		if len(fields) != 2 || len(fields[0]) != 64 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "*")
+		if name == asset || path.Base(name) == asset {
+			return strings.ToLower(fields[0])
+		}
+	}
+	return ""
+}
+
+// releaseAssetURL is where `vdb setup` fetches an asset the installer did not
+// stage. The ZFS bundle is fetched here rather than by install.ps1 because only
+// setup knows which one is needed: it has just created the distro, so it can ask
+// the running kernel, whereas the installer would need WSL to already exist.
+//
+// The version is the one stamped into this binary, so a v0.4.0 vdb.exe takes
+// v0.4.0 assets and never silently drifts onto a newer release's. An unstamped
+// dev build has no matching release, so it falls back to latest.
+func releaseAssetURL(repo, version, asset string) string {
+	v := strings.TrimSpace(version)
+	if v == "" || strings.Contains(v, "dev") {
+		return "https://github.com/" + repo + "/releases/latest/download/" + asset
+	}
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	return "https://github.com/" + repo + "/releases/download/" + v + "/" + asset
 }

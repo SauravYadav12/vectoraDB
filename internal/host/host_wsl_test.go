@@ -93,13 +93,72 @@ func TestParseKernelRelease(t *testing.T) {
 
 // TC1.7 — the ZFS bundle is named for the kernel it was built against, so a
 // stale bundle is a missing file rather than a module that silently won't load.
+//
+// Two names exist: the current modules-only bundle, and the pre-split bundle
+// that also carried the userland. Setup tries both, so a vdb.exe pinned to an
+// older release can still find its own asset.
 func TestZFSBundleName(t *testing.T) {
-	want := "vectoradb-zfs-6.6.87.2-microsoft-standard-WSL2.tar.gz"
-	if got := zfsBundleName("6.6.87.2-microsoft-standard-WSL2"); got != want {
+	const rel = "6.6.87.2-microsoft-standard-WSL2"
+	want := "vectoradb-zfs-modules-" + rel + ".tar.gz"
+	if got := zfsBundleName(rel); got != want {
 		t.Errorf("zfsBundleName = %q, want %q", got, want)
 	}
-	if got := zfsBundleName(" 6.6.87.2-microsoft-standard-WSL2\n"); got != want {
+	if got := zfsBundleName(" " + rel + "\n"); got != want {
 		t.Errorf("zfsBundleName(untrimmed) = %q, want %q", got, want)
+	}
+
+	wantLegacy := "vectoradb-zfs-" + rel + ".tar.gz"
+	if got := legacyZFSBundleName(rel); got != wantLegacy {
+		t.Errorf("legacyZFSBundleName = %q, want %q", got, wantLegacy)
+	}
+	if zfsBundleName(rel) == legacyZFSBundleName(rel) {
+		t.Error("the split and legacy bundle names must differ, or the fallback is a no-op")
+	}
+}
+
+// TC1.8 — setup fetches assets from the release matching this binary, so a
+// pinned build never silently pulls a newer release's kernel modules. Only an
+// unstamped dev build, which has no release of its own, falls back to latest.
+func TestReleaseAssetURL(t *testing.T) {
+	const repo, asset = "o/r", "a.tar.gz"
+	cases := []struct{ version, want string }{
+		{"0.4.0", "https://github.com/o/r/releases/download/v0.4.0/a.tar.gz"},
+		{"v0.4.0", "https://github.com/o/r/releases/download/v0.4.0/a.tar.gz"},
+		{" 0.4.0 ", "https://github.com/o/r/releases/download/v0.4.0/a.tar.gz"},
+		{"0.1.0-dev", "https://github.com/o/r/releases/latest/download/a.tar.gz"},
+		{"", "https://github.com/o/r/releases/latest/download/a.tar.gz"},
+	}
+	for _, c := range cases {
+		if got := releaseAssetURL(repo, c.version, asset); got != c.want {
+			t.Errorf("releaseAssetURL(%q) = %q, want %q", c.version, got, c.want)
+		}
+	}
+}
+
+// TC1.9 — downloaded assets are verified against the release's SHA256SUMS.
+// These files are unpacked into the distro and their modules loaded into the
+// kernel, so TLS alone is not a sufficient answer to what they are.
+func TestChecksumFor(t *testing.T) {
+	const sum = "b5bb9d8014a0f9b1d61e21e796d78dccdf1352f23cd32812f4850b878ae4944c"
+	listing := "" +
+		"0000000000000000000000000000000000000000000000000000000000000000  other.tar.gz\n" +
+		sum + "  vectoradb-distro.tar.gz\n" +
+		sum + " *dist/vectoradb-zfs-modules-6.6.87.2-microsoft-standard-WSL2.tar.gz\r\n" +
+		"garbage line that should be ignored\n"
+
+	if got := checksumFor(listing, "vectoradb-distro.tar.gz"); got != sum {
+		t.Errorf("checksumFor(distro) = %q, want %q", got, sum)
+	}
+	// Binary-mode "*" prefix and a path both resolve by base name.
+	if got := checksumFor(listing, "vectoradb-zfs-modules-6.6.87.2-microsoft-standard-WSL2.tar.gz"); got != sum {
+		t.Errorf("checksumFor(modules) = %q, want %q", got, sum)
+	}
+	// An unlisted asset is "" (skip), never a wrong hash.
+	if got := checksumFor(listing, "not-published.tar.gz"); got != "" {
+		t.Errorf("checksumFor(absent) = %q, want empty", got)
+	}
+	if got := checksumFor("", "anything"); got != "" {
+		t.Errorf("checksumFor(empty listing) = %q, want empty", got)
 	}
 }
 

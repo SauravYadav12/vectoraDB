@@ -37,12 +37,43 @@ jobs:
           done
 
       # TC4.4/TC4.5 — installer logic (functions only; guarded main is not run).
-      - name: Pester (install.ps1)
+      # TC4.* -- installer logic and the Windows install flow. The guarded main is
+      # not run; the E2E-tagged cases are skipped unless VDB_TEST_E2E is set,
+      # since they create a WSL distro and download hundreds of megabytes.
+      - name: Pester (installer + Windows install flow)
         shell: pwsh
         run: |
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module Pester -MinimumVersion 5.0 -Force -Scope CurrentUser
-          Invoke-Pester deploy/install.Tests.ps1 -Output Detailed -CI
+          Invoke-Pester deploy/install.Tests.ps1, deploy/windows-install.Tests.ps1 -Output Detailed -CI
+
+      # The installer is fetched with `irm | iex`, which pipes the file's bytes
+      # straight into the parser. A BOM there produces "The term '# ' is not
+      # recognized"; non-ASCII without a BOM makes Windows PowerShell 5.1 read it
+      # as ANSI and fail to parse. Both have happened, so both are asserted here
+      # as well as in Pester -- this is the one that gates the merge.
+      - name: install.ps1 is BOM-free ASCII
+        shell: pwsh
+        run: |
+          $b = [System.IO.File]::ReadAllBytes("deploy/install.ps1")
+          if ($b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) {
+            throw "deploy/install.ps1 has a UTF-8 BOM; `irm | iex` will fail on line 1"
+          }
+          $bad = $b | Where-Object { $_ -gt 127 }
+          if ($bad) { throw "deploy/install.ps1 contains non-ASCII bytes" }
+          "install.ps1 encoding OK"
+
+      # Windows PowerShell 5.1 is still the default shell on most machines and
+      # parses differently from PowerShell 7, which is what CI's pwsh is.
+      - name: install.ps1 parses under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $errors = $null
+          [System.Management.Automation.PSParser]::Tokenize(
+            (Get-Content deploy/install.ps1 -Raw), [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { $_.Message }; throw "parse errors" }
+          . .\deploy\install.ps1   # dot-source must not run the installer
+          "install.ps1 parses and dot-sources cleanly under 5.1"
 
   cross-compile-from-linux:
     # TC0.1/TC4.1 — the release matrix (incl. windows/amd64) builds from Linux.
