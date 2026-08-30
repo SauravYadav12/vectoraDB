@@ -168,7 +168,10 @@ func Init() error {
 			return err
 		}
 		activeStorage().protectPrimary()
-		return InstallLedger("main") // already up — ensure the ledger is present
+		if err := InstallLedger("main"); err != nil { // ensure the ledger is present
+			return err
+		}
+		return syncAppRole("main")
 	}
 	store := activeStorage()
 	if !store.exists("main") {
@@ -195,7 +198,17 @@ func Init() error {
 	// (idempotent — also applies on an upgrade of an existing install).
 	store.protectPrimary()
 	// Install the schema ledger into main; every branch (a ZFS clone) inherits it.
-	return InstallLedger("main")
+	if err := InstallLedger("main"); err != nil {
+		return err
+	}
+	return syncAppRole("main")
+}
+
+// syncAppRole sets the non-superuser client role's password to the per-install
+// secret, so the gateway can log clients in as it. The role is created by the
+// ledger install (roles are cluster-global and travel with a branch's clone).
+func syncAppRole(name string) error {
+	return psqlStdin(name, fmt.Sprintf("ALTER ROLE vdbclient WITH LOGIN PASSWORD %s;", quoteLiteral(pgPass())))
 }
 
 // syncRolePassword sets the Postgres role password to the per-install secret.

@@ -72,8 +72,11 @@ RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
 $$;
 
 -- ddl_command_start: enforce guardrails BEFORE the command runs.
+-- SECURITY DEFINER: the ledger's triggers record history with the owner's
+-- privileges, so a non-superuser client can trigger them (by running DDL) without
+-- being granted any write access to the ledger itself. search_path is pinned.
 CREATE OR REPLACE FUNCTION vdb.guard_ddl_start() RETURNS event_trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, vdb AS $$
 DECLARE act text; c record; allow text;
 BEGIN
   SELECT action INTO act FROM vdb.policy WHERE op = TG_TAG;
@@ -99,7 +102,7 @@ $$;
 
 -- ddl_command_end: record CREATE/ALTER changes (drops are recorded in sql_drop).
 CREATE OR REPLACE FUNCTION vdb.log_ddl_end() RETURNS event_trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, vdb AS $$
 DECLARE r record; c record; q text; st text; rk text;
 BEGIN
   SELECT * INTO c FROM vdb._ctx();
@@ -129,7 +132,7 @@ $$;
 
 -- sql_drop: record drops that were allowed through the guardrails.
 CREATE OR REPLACE FUNCTION vdb.log_ddl_drop() RETURNS event_trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, vdb AS $$
 DECLARE r record; c record; q text;
 BEGIN
   SELECT * INTO c FROM vdb._ctx();
@@ -206,3 +209,30 @@ CREATE EVENT TRIGGER vdb_log_end ON ddl_command_end
   EXECUTE FUNCTION vdb.log_ddl_end();
 CREATE EVENT TRIGGER vdb_log_drop ON sql_drop
   EXECUTE FUNCTION vdb.log_ddl_drop();
+
+-- ── Least-privilege client role ─────────────────────────────────────────────
+-- The gateway logs clients in as this NON-superuser role, so a client session is
+-- subject to RLS and GRANTs and cannot bypass the append-only ledger — only a
+-- superuser can disable a trigger or flip session_replication_role. Roles are
+-- cluster-global and copied with a branch's clone; the engine sets its password.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'vdbclient') THEN
+    CREATE ROLE vdbclient LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB NOBYPASSRLS;
+  END IF;
+END $$;
+
+-- Full access to application data (it owns what it creates; these cover what the
+-- superuser created, e.g. imported tables, now and in future).
+GRANT USAGE, CREATE ON SCHEMA public TO vdbclient;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO vdbclient;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO vdbclient;
+ALTER DEFAULT PRIVILEGES FOR ROLE vectoradb IN SCHEMA public GRANT ALL ON TABLES TO vdbclient;
+ALTER DEFAULT PRIVILEGES FOR ROLE vectoradb IN SCHEMA public GRANT ALL ON SEQUENCES TO vdbclient;
+
+-- The ledger: read only. History is written by the SECURITY DEFINER triggers,
+-- not by the client, so a client can read its history and run `verify` but has no
+-- INSERT/UPDATE/DELETE on the table at all — it cannot forge or rewrite entries.
+GRANT USAGE ON SCHEMA vdb TO vdbclient;
+GRANT SELECT ON vdb.schema_ledger, vdb.policy TO vdbclient;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA vdb TO vdbclient;

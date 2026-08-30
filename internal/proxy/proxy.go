@@ -62,9 +62,10 @@ func touch(name string) {
 // this before forwarding to the backend.
 const realDatabase = "vectoradb"
 
-// realUser is the Postgres role inside every branch. The Gateway always logs in
-// to the backend as this role (using the API key only to gate the client).
-const realUser = "vectoradb"
+// realUser is the Postgres role the Gateway logs clients in as — a non-superuser
+// role, so client sessions obey RLS/GRANTs and cannot bypass the append-only
+// ledger. The API key gates the client; this role bounds what they can do.
+const realUser = "vdbclient"
 
 const (
 	codeStartup30 = 196608   // protocol 3.0 StartupMessage
