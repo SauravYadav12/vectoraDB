@@ -15,10 +15,14 @@
 package host
 
 import (
+	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Guest environment variable marks a vdb process that is already running inside
@@ -120,10 +124,29 @@ func isPostgresURL(s string) bool {
 	return strings.HasPrefix(s, "postgres://") || strings.HasPrefix(s, "postgresql://")
 }
 
-// bundledLinuxBinary looks for a prebuilt linux vdb (vdb-linux-<arch>) shipped
-// alongside the host binary by the installer, or in ./dist for a dev build. Used
-// by both the macOS (Lima) and Windows (WSL2) setup paths to seed the guest.
+// cacheDir is where `vdb setup` caches a freshly-downloaded engine binary. A
+// user-writable path (no sudo), preferred over the installer-staged copy.
+func cacheDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.TempDir()
+	}
+	return filepath.Join(home, ".vectoradb")
+}
+
+func regularFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// bundledLinuxBinary looks for a prebuilt linux vdb (vdb-linux-<arch>): first a
+// build `vdb setup` freshly downloaded into the cache dir, then one the installer
+// staged alongside the host binary, then ./dist for a dev build. Used by both the
+// macOS (Lima) and Windows (WSL2) setup paths to seed the guest.
 func bundledLinuxBinary(arch string) string {
+	if c := filepath.Join(cacheDir(), "vdb-linux-"+arch); regularFile(c) {
+		return c
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return ""
@@ -135,9 +158,93 @@ func bundledLinuxBinary(arch string) string {
 		filepath.Join(dir, "..", "dist", "vdb-linux-"+arch),
 		filepath.Join(dir, "dist", "vdb-linux-"+arch),
 	} {
-		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+		if regularFile(c) {
 			return c
 		}
 	}
 	return ""
+}
+
+// refreshEngineBinary downloads the latest Linux engine binary into the cache dir
+// so `vdb setup` installs the newest build instead of reusing a stale one, and
+// overwrites the previous cached build. Best-effort: on any problem it returns
+// "" and setup falls back to the installer-staged binary. VECTORADB_NO_REFRESH=1
+// skips it (offline or version-pinned installs); VDB_REPO / VDB_VERSION override
+// the source, matching the installer.
+func refreshEngineBinary(arch string) string {
+	if v := os.Getenv("VECTORADB_NO_REFRESH"); v == "1" || v == "true" {
+		return ""
+	}
+	repo := envOr("VDB_REPO", "vectoradb/vectoraDB")
+	version := envOr("VDB_VERSION", "latest")
+	asset := "vdb-linux-" + arch
+	url := fmt.Sprintf("https://github.com/%s/releases/latest/download/%s", repo, asset)
+	if version != "latest" {
+		url = fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, version, asset)
+	}
+
+	fmt.Println("Checking for the latest engine build…")
+	dest := filepath.Join(cacheDir(), asset)
+	if err := downloadFile(url, dest); err != nil {
+		fmt.Printf("note: could not fetch the latest build (%v) — using the installed one.\n", err)
+		return ""
+	}
+	if !isELF(dest) { // a 404 page or truncated download, not a Linux binary
+		_ = os.Remove(dest)
+		fmt.Println("note: the downloaded build looks invalid — using the installed one.")
+		return ""
+	}
+	return dest
+}
+
+func envOr(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
+}
+
+func downloadFile(url, dest string) error {
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("http %d", resp.StatusCode)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	tmp := dest + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dest) // atomic replace of the previous cached build
+}
+
+// isELF reports whether a file starts with the ELF magic — a cheap sanity check
+// that the download is a Linux binary and not an error page.
+func isELF(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(f, magic[:]); err != nil {
+		return false
+	}
+	return magic == [4]byte{0x7f, 'E', 'L', 'F'}
 }

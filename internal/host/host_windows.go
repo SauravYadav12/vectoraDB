@@ -224,6 +224,10 @@ func setupWindows() error {
 	fmt.Println("Setting up VectoraDB…")
 	logf("\n---- vdb setup %s ----\n", version.Version)
 
+	// Fetch the latest engine build so re-running setup installs the newest one
+	// (provisionGuestWSL reinstalls the engine binary on every setup).
+	refreshEngineBinary("amd64") // WSL2 is x86_64
+
 	name := currentDistro()
 	if distroExists(name) {
 		step(fmt.Sprintf("Reusing the existing %q distro", name))

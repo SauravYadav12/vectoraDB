@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -100,6 +101,10 @@ func setupDarwin() error {
 			"Install it with:\n  brew install lima\n" +
 			"then run `vdb setup` again")
 	}
+	// Fetch the latest engine build up front, so even an existing VM is updated
+	// (not just a freshly created one).
+	refreshEngineBinary(runtime.GOARCH)
+
 	name := instance()
 	if instanceExists(name) {
 		if !instanceRunning(name) {
@@ -108,7 +113,7 @@ func setupDarwin() error {
 				return err
 			}
 		}
-		fmt.Printf("VM %q is ready. Bringing the stack up…\n", name)
+		fmt.Printf("VM %q is ready.\n", name)
 	} else {
 		fmt.Printf("Creating the VectoraDB VM %q (first run downloads Ubuntu; a few minutes)…\n", name)
 		if err := limactl("start", "--name", name, "--tty=false", "template://ubuntu").Run(); err != nil {
@@ -118,11 +123,17 @@ func setupDarwin() error {
 			return err
 		}
 	}
-	// Bring the stack up inside the guest.
+	// Always (re)install the engine binary, so re-running `vdb setup` picks up a
+	// newer build instead of keeping the one already inside the VM.
+	if err := installGuestBinary(name); err != nil {
+		return err
+	}
+	fmt.Println("Bringing the stack up…")
 	return forward([]string{"start"})
 }
 
 // provisionGuest installs Docker + ZFS inside a freshly created VM. The engine
+// binary is installed separately (installGuestBinary), on every setup. The engine
 // itself auto-creates the ZFS pool and builds the image on first `up`.
 func provisionGuest(name string) error {
 	fmt.Println("Installing Docker and ZFS in the VM…")
@@ -132,7 +143,7 @@ func provisionGuest(name string) error {
 	if err := limactl("shell", name, "--", "sh", "-c", script).Run(); err != nil {
 		return fmt.Errorf("installing guest dependencies: %w", err)
 	}
-	return installGuestBinary(name)
+	return nil
 }
 
 // installGuestBinary copies the bundled Linux vdb binary into the VM and puts it
