@@ -52,14 +52,17 @@ Describe 'Add-ToPath' {
 Describe 'installer is independent of WSL' {
     BeforeAll { . "$PSScriptRoot/install.ps1" }
     It 'no longer chooses the ZFS bundle itself' {
-        # Choosing it needs the WSL kernel, which the installer cannot know
-        # before WSL exists; setup does it. Kernel detection survives only as a
-        # best-effort pre-stage for older releases.
         Get-Command Get-ZfsBundleName -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
     }
 
-    It 'degrades gracefully when WSL is absent' {
-        { Get-WslKernelRelease } | Should -Not -Throw
+    It 'never asks a running distro for the kernel release' {
+        # The installer may legitimately run before WSL exists, so it must not
+        # query a distro for anything. It used to, to pick a ZFS bundle, and
+        # that is why the docs once told users to install Ubuntu first. Windows
+        # stores branches on btrfs now, so nothing is kernel-specific and the
+        # question is never asked.
+        $src = Get-Content "$PSScriptRoot/install.ps1" -Raw
+        $src | Should -Not -Match 'uname -r'
     }
     It 'never mentions a distribution when installing WSL' {
         $src = Get-Content "$PSScriptRoot/install.ps1" -Raw

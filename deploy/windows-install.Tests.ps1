@@ -74,11 +74,16 @@ Describe 'installer does not depend on WSL' {
         $src | Should -Not -Match 'downloads Docker and ZFS'
     }
 
-    It 'does not abort when WSL has no distribution' {
-        # A machine with WSL but no distro returns an error string from
-        # `wsl -e uname -r`; it must not be mistaken for a kernel version.
+    It 'runs no command inside a distro' {
+        # Stronger than the guard this replaces, which checked that the output of
+        # `wsl -e uname -r` was validated before use. The installer no longer
+        # runs anything in a distro at all, so a machine with WSL present but no
+        # distribution -- and a machine with no WSL -- take the same path.
         $src = Get-Content $Installer -Raw
-        $src | Should -Match "rel -match"
+        # Whitespace after -e is required: PowerShell's -match is case
+        # insensitive, so a bare 'wsl\.exe -e' also matches the entirely
+        # legitimate `Get-Command wsl.exe -ErrorAction SilentlyContinue`.
+        $src | Should -Not -Match 'wsl\.exe\s+-e\s'
     }
 
     It 'installs WSL without a Linux distribution' {
