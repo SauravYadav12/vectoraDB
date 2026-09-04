@@ -54,23 +54,24 @@ Describe 'installer encoding' {
 Describe 'installer does not depend on WSL' {
     BeforeAll { . $Installer }
 
-    It 'reports no kernel when WSL is absent, rather than failing' {
-        # The installer may legitimately run before WSL exists. Kernel detection
-        # must degrade to $null, never throw and never block the install.
-        { Get-WslKernelRelease } | Should -Not -Throw
+    It 'never asks WSL for the kernel release' {
+        # The installer may legitimately run before WSL exists, so it must not
+        # query a running distro for anything. This used to drive ZFS bundle
+        # selection and was the reason the docs told users to install Ubuntu
+        # first. Windows stores branches on btrfs now, so nothing is
+        # kernel-specific and nothing needs asking.
+        $src = Get-Content $Installer -Raw
+        $src | Should -Not -Match 'uname -r'
     }
 
-    It 'treats the ZFS bundle as optional, never required' {
-        # Staging it is a compatibility shim for releases whose vdb.exe predates
-        # setup fetching its own bundle. It must stay best-effort: Get-File's
-        # third argument $false means "optional", so a missing bundle warns and
-        # the install continues rather than stopping.
+    It 'does not reference ZFS at all' {
+        # Windows uses btrfs, which is in the stock WSL kernel. A ZFS asset
+        # reference here downloads something no release publishes any more, and
+        # the failed fetch prints a warning that reads like a broken install --
+        # which is exactly what users reported seeing.
         $src = Get-Content $Installer -Raw
-        if ($src -match 'vectoradb-zfs') {
-            # The name and the optional flag sit on separate lines, so match the
-            # call itself rather than requiring them adjacent.
-            $src | Should -Match 'Get-File \(Get-VdbAsset \$name\)[^\r\n]*\$false'
-        }
+        $src | Should -Not -Match 'vectoradb-zfs'
+        $src | Should -Not -Match 'downloads Docker and ZFS'
     }
 
     It 'does not abort when WSL has no distribution' {
