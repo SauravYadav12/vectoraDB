@@ -65,22 +65,6 @@ function Test-Admin {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# Get-WslKernelRelease reports the kernel WSL runs (`uname -r`), or $null when
-# WSL is absent or has no distribution to run it in. wsl.exe emits UTF-16LE.
-#
-# The installer does not need this -- setup chooses the ZFS bundle -- but it is
-# used to opportunistically pre-stage that bundle for older releases.
-function Get-WslKernelRelease {
-    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return $null }
-    try {
-        $raw = & wsl.exe -e uname -r 2>$null
-        $rel = ($raw -join '').Trim() -replace "`0", ''
-        # A machine with WSL but no distro returns an error string, not a kernel.
-        if ($rel -match '^[0-9]+\.[0-9]+') { return $rel }
-    } catch { }
-    return $null
-}
-
 # Test-WslReady reports whether WSL is installed and healthy enough to import a
 # distro. `wsl --status` fails when the platform is present but not enabled.
 function Test-WslReady {
@@ -277,16 +261,6 @@ function Invoke-Install {
     Remove-Item "$Prefix\docker-context.tar.gz" -Force
 
     # 3. The Ubuntu rootfs. ~340 MB, so don't re-fetch a verified copy.
-    #
-    # Choosing the ZFS bundle is `vdb setup`'s job: it is specific to the WSL
-    # kernel, and only setup can know which one is needed, having just created
-    # the distro -- whereas this script may run before WSL exists at all.
-    #
-    # It is still staged opportunistically below when WSL happens to be up, purely
-    # so a new installer paired with an older release cannot produce a broken
-    # install: a vdb.exe from before setup could fetch its own bundle would
-    # otherwise find nothing and stop. Harmless when setup would fetch it anyway,
-    # since a staged bundle is simply used as-is.
     $rootfs = "$Prefix\vectoradb-rootfs.tar.gz"
     $verify = -not $env:VDB_ROOTFS_URL
     if ((Test-Path $rootfs) -and $verify -and (Test-UpstreamChecksum $rootfs "$RootfsBase/SHA256SUMS" $RootfsName)) {
@@ -295,17 +269,6 @@ function Invoke-Install {
         Write-Step "Downloading the Ubuntu rootfs (~340 MB, one time)"
         Get-File $RootfsUrl $rootfs | Out-Null
         if ($verify) { Assert-UpstreamChecksum $rootfs "$RootfsBase/SHA256SUMS" $RootfsName }
-    }
-
-    # Compatibility staging, per the note above. Best effort throughout: any
-    # failure here is silent, because setup fetches the bundle itself.
-    $rel = Get-WslKernelRelease
-    if ($rel) {
-        foreach ($name in @("vectoradb-zfs-modules-$rel.tar.gz", "vectoradb-zfs-$rel.tar.gz")) {
-            if (Test-Path "$Prefix\$name") { break }
-            if (Get-File (Get-VdbAsset $name) "$Prefix\$name" $false) { break }
-            Remove-Item "$Prefix\$name" -Force -ErrorAction SilentlyContinue
-        }
     }
 
     # 4. PATH -- persisted for new shells, and live in this one so `vdb` works
@@ -323,7 +286,7 @@ function Invoke-Install {
         Write-Host "Installed. Run:  vdb setup" -ForegroundColor Green
         return
     }
-    Write-Step "Setting up VectoraDB (first run downloads Docker and ZFS)"
+    Write-Step "Setting up VectoraDB (first run sets up the database engine)"
     Write-Host ""
     & "$Prefix\vdb.exe" setup
     if ($LASTEXITCODE -ne 0) {

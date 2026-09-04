@@ -257,16 +257,17 @@ func setupWindows() error {
 	if err == nil {
 		return finishSetup(name)
 	}
-	// One retry, because the very first start races the Postgres container's
-	// initdb: the engine connects as soon as the socket appears, but the
-	// entrypoint's temporary server is still creating the database, so psql gets
-	// `database "vectoradb" does not exist`. initdb is slow enough on a fresh
-	// ZFS pool to lose that race reliably here, and `start` is idempotent — by
-	// the retry the container is initialised and it succeeds.
+	// One retry. This used to be the only defence against the first start racing
+	// the Postgres container's initdb, because the engine's readiness probe used
+	// the Unix socket and so returned true while the entrypoint's temporary
+	// server was still running. waitReady now probes TCP, which that temporary
+	// server does not listen on, so the race is fixed at its source and this is
+	// no longer load-bearing.
 	//
-	// This compensates for an engine-side readiness check; if that gains a
-	// proper wait, drop this.
-	step("Retrying (the first start raced container initialisation)")
+	// Kept because `start` is idempotent and a first-run start has plenty of
+	// other ways to be slow on a cold machine, but a failure here is now a real
+	// failure rather than an expected one.
+	step("Retrying the start")
 	if err := forwardQuiet([]string{"start"}); err != nil {
 		return err
 	}

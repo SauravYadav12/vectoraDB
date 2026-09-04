@@ -142,13 +142,26 @@ func startContainer(name string, primary bool) error {
 }
 
 func waitReady(name string) error {
-	// Poll frequently: a resumed branch's Postgres is usually accepting in ~0.4s,
-	// so a coarse sleep between probes dominates the auto-resume wake time. The
-	// probe (docker exec pg_isready) is itself the main cost per cycle.
+	// Probed over TCP, deliberately, not the Unix socket.
+	//
+	// On a container's first start the Postgres entrypoint runs initdb against a
+	// *temporary* server so it can create the database and run init scripts. That
+	// server listens on the Unix socket but is started with listen_addresses='',
+	// so a socket probe reports ready while the real cluster does not yet exist.
+	// The engine then connects and gets either `database "vectoradb" does not
+	// exist` or, if it lands in the window where the entrypoint stops the
+	// temporary server, `the database system is shutting down` — which is exactly
+	// how setup failed on a fresh Windows machine.
+	//
+	// TCP is refused for the whole of that window and accepted only once the real
+	// server is up, which is the condition actually wanted here. Measured on a
+	// fresh container: at the first socket-ready sample TCP still reported
+	// "Connection refused" on every attempt, and the socket query failed with one
+	// of the two errors above.
 	deadline := time.Now().Add(60 * time.Second)
 	for {
 		if exec.Command("sudo", "docker", "exec", container(name),
-			"pg_isready", "-U", pgUser, "-d", pgDatabase).Run() == nil {
+			"pg_isready", "-h", "127.0.0.1", "-U", pgUser, "-d", pgDatabase).Run() == nil {
 			return nil
 		}
 		if time.Now().After(deadline) {
